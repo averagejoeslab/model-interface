@@ -86,7 +86,7 @@ One class per concern, each small:
 | `server.py` | The two endpoints and a models listing. |
 | `config.py` | The TOML file, loaded into those objects. |
 
-Tests run without keys or Docker, against a provider that plays a script and a sandbox that records commands:
+Tests run without keys, against a provider that plays a script and a sandbox that records commands. The sandbox's own tests run against a real container when a Docker daemon is reachable, and skip when it isn't:
 
 ```bash
 uv pip install -e ".[dev]" && pytest
