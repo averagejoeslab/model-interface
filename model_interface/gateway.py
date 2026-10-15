@@ -7,6 +7,8 @@ import collections
 import datetime
 import json
 import os
+import queue
+import socket
 import threading
 import time
 import uuid
@@ -118,30 +120,83 @@ class Gateway:
         self.killswitch = killswitch or Killswitch()
         self.sessions = sessions or Sessions(None)
 
+    POLL = 0.1          # how often the killswitch is checked while the provider is silent
+    END = object()      # what the reader puts on the queue when the stream is over
+
     def stream(self, run: Run, headers: dict):
-        """The provider's stream, line by line, verbatim. Cut at the next line if the killswitch is on."""
+        """The provider's stream, line by line, verbatim. Cut within POLL seconds of the killswitch, even mid-silence."""
         model = self.models[run.model]
         format: Format = model.provider.format
         reading = format.reading()
+        lines: queue.Queue = queue.Queue()
+        opened = {}                                    # the entered response, once the reader has it, so a cut can hang up
+
+        def read():                                    # the provider's lines, read on their own thread so a silence can't hold the switch
+            try:
+                with format.open(model.provider.client, {**run.request, "model": model.name}, headers) as response:
+                    opened["response"] = response
+                    for line in response.iter_lines():
+                        lines.put(line)
+            except BaseException as e:
+                lines.put(e)
+            lines.put(self.END)
+
+        threading.Thread(target=read, daemon=True).start()
         try:
-            with format.open(model.provider.client, {**run.request, "model": model.name}, headers) as upstream:
-                for line in upstream.iter_lines():
-                    if self.killswitch.is_on(run.session):
-                        run.interrupted = True
-                        reading.message["stop_reason"] = "interrupted"
-                        yield from format.closing(reading)
-                        return
-                    run.lines += 1
-                    if run.first_line_at is None:
-                        run.first_line_at = time.time()
-                    reading.feed(line)
-                    yield line + "\n"
+            while True:
+                try:
+                    item = lines.get(timeout=self.POLL)
+                except queue.Empty:
+                    item = None                        # nothing arrived: check the switch anyway
+                if self.killswitch.is_on(run.session):
+                    run.interrupted = True
+                    reading.message["stop_reason"] = "interrupted"
+                    yield from format.closing(reading)
+                    return
+                if item is None:
+                    continue
+                if item is self.END:
+                    return
+                if isinstance(item, BaseException):
+                    raise item
+                run.lines += 1
+                if run.first_line_at is None:
+                    run.first_line_at = time.time()
+                reading.feed(item)
+                yield item + "\n"
         except Exception as e:
             run.error = f"{type(e).__name__}: {e}"
             if run.lines == 0:
-                raise                                 # before anything was sent: the server answers with the provider's status
+                raise                                  # before anything was sent: the server answers with the provider's status
             yield format.error_line(str(e))
         finally:
+            self._hang_up(opened.get("response"))      # the provider's connection goes, and so does its generation
             run.ended_at = time.time()
             run.response = reading.message
             self.sessions.add(run)
+
+    @staticmethod
+    def _hang_up(response):
+        """Close the provider's connection from outside the reader's thread.
+
+        A close alone doesn't wake a thread blocked on the socket, and the provider wouldn't notice until
+        its next write, so the socket is shut down first when it can be reached; the close then follows.
+        """
+        if response is None:
+            return
+        http = getattr(response, "http_response", response)
+        sock = http                                    # httpx -> httpcore -> the socket, by whatever names this version uses
+        for _ in range(10):
+            step = next((a for a in ("_sock", "_network_stream", "_connection", "_httpcore_stream", "_stream", "stream") if hasattr(sock, a)), None)
+            if step is None or isinstance(sock, socket.socket):
+                break
+            sock = getattr(sock, step)
+        if isinstance(sock, socket.socket):
+            try:
+                sock.shutdown(socket.SHUT_RDWR)
+            except OSError:
+                pass
+        try:
+            http.close()
+        except Exception:
+            pass

@@ -31,7 +31,7 @@ class FakeProvider:
     """Answers in whichever format was asked, word by word, and notices when the caller hangs up."""
 
     def __init__(self):
-        self.text, self.tool, self.delay = "Hello there, friend.", None, 0.0
+        self.text, self.tool, self.delay, self.stall = "Hello there, friend.", None, 0.0, None   # stall: (after line n, seconds of silence)
         self.requests, self.closed_early = [], False
         self.app = FastAPI()
         self.app.post("/v1/messages")(self.messages)
@@ -87,6 +87,8 @@ class FakeProvider:
             for line in lines:
                 if self.delay:
                     await asyncio.sleep(self.delay)
+                if self.stall and sent == self.stall[0]:
+                    await asyncio.sleep(self.stall[1])
                 yield line
                 sent += 1
         finally:
@@ -104,7 +106,7 @@ def fake():
 
 @pytest.fixture
 def provider(fake):
-    fake.text, fake.tool, fake.delay, fake.requests[:], fake.closed_early = "Hello there, friend.", None, 0.0, [], False
+    fake.text, fake.tool, fake.delay, fake.stall, fake.requests[:], fake.closed_early = "Hello there, friend.", None, 0.0, None, [], False
     return fake
 
 

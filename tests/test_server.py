@@ -156,3 +156,18 @@ def test_the_sdks_see_a_cut_stream_as_a_whole_message(server, provider):
         m = s.get_final_message()
     assert m.stop_reason == "interrupted" and 0 < len(text) < len(provider.text)
     httpx.put(f"{server}/v1/killswitch/s-sdk", headers=H, json={"on": False})
+
+
+def test_the_killswitch_cuts_within_a_tenth_of_a_second_even_while_the_provider_is_silent(server, provider):
+    provider.stall = (3, 8.0)                            # three lines, then eight seconds of nothing, as a thinking model does
+    t0 = time.time()
+    threading.Timer(0.5, lambda: httpx.put(f"{server}/v1/killswitch/s-silent", headers=H, json={"on": True})).start()
+    run, seen = read_stream(server, "/v1/messages", anthropic_body(), "s-silent")
+    elapsed = time.time() - t0
+    assert elapsed < 1.5, f"the cut took {elapsed:.1f}s: it waited for the provider instead of the switch"
+    events = [json.loads(s) for s in seen]
+    assert events[-2]["delta"]["stop_reason"] == "interrupted" and events[-1]["type"] == "message_stop"
+    assert httpx.get(f"{server}/v1/runs/{run}", headers=H).json()["interrupted"] is True
+    httpx.put(f"{server}/v1/killswitch/s-silent", headers=H, json={"on": False})
+    time.sleep(0.3)
+    assert provider.closed_early
