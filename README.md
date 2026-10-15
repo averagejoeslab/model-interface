@@ -25,9 +25,25 @@ GET /v1/killswitch   PUT /v1/killswitch {on}           everything
 
 **Streaming only.** A call must ask for a stream, and gets a 400 otherwise. A blocking call has no moment in it to observe or to stop; a stream has one every few milliseconds, and the gateway acts at each: it reads a copy of the line for the record, checks the killswitch, and forwards it.
 
-**Sessions.** Every call is a run, with its id in the `X-Run` header, under the session named in the `X-Session` header. A run's record holds the request as received, the response as read from the stream, time to first line, duration, line count, tokens, stop reason, and whether it was cut. The sessions endpoints show a session's runs in order, so a whole task is readable turn by turn.
+**The record: sessions of streams of blocks.** A session is named in the `X-Session` header. A stream is one request and the response that streams back for it, with its id in the `X-Stream` header. Blocks are what the response is made of: in Messages, `thinking`, `text` and `tool_use`, straight from the block events on the wire; in Chat Completions, `reasoning`, `content` and one `tool_call` per index, inferred from the deltas. Every level has an id, a start and an end. The request is kept verbatim on the stream; the blocks are the response.
 
-**The killswitch.** A flag per session and one for everything. On: any running stream in scope is cut at its next line, the upstream connection closes so the provider stops generating, and the caller's stream ends with a whole message whose stop reason is `interrupted`; new calls in scope are refused with 423 until the flag is off. Off: calls run.
+```json
+{"session": "task-1", "started": "…", "ended": "…",
+ "streams": [
+   {"id": "str_…", "started": "…", "ended": "…", "request": { "…verbatim…" },
+    "message": {"id": "msg_…", "model": "claude-sonnet-5-5", "role": "assistant"},
+    "blocks": [
+      {"index": 0, "type": "thinking", "started": "…", "ended": "…", "thinking": "…", "signature": "…"},
+      {"index": 1, "type": "text",     "started": "…", "ended": "…", "text": "…"},
+      {"index": 2, "type": "tool_use", "started": "…", "ended": "…", "id": "toolu_…", "name": "shell", "input": {"cmd": "…"}}
+    ],
+    "stop_reason": "tool_use", "usage": {"input_tokens": 448, "output_tokens": 76}, "interrupted": false, "cut": null}
+ ]}
+```
+
+**It is live.** The record is built from the stream's lines as they are forwarded, not after. A block appears the moment it opens, grows with each delta, and gets its end time when it closes. `GET /v1/sessions/{s}` returns the session as it stands at that instant. `GET /v1/sessions/{s}/live` is a feed of the record's own events as they happen: `stream.started`, `stream.message`, `block.started`, `block.delta`, `block.ended`, `stream.ended`. A policy can be evaluated at any of those moments over any slice: one block, the last few blocks, a stream, or the whole session.
+
+**The killswitch.** A flag per session and one for everything. On: any running stream in scope is cut within a tenth of a second, whatever the provider is doing, the upstream connection closes so the provider stops generating, and the caller's stream ends with a whole message whose stop reason is `interrupted`; the record notes who cut it and in which block. New calls in scope are refused with 423 until the flag is off. Off: calls run.
 
 ## Running it
 
@@ -46,7 +62,8 @@ MI_URL=http://127.0.0.1:8080 MI_KEY=some-secret MI_SESSION=task-1 uv run example
 Watch it, and stop it, from another shell:
 
 ```bash
-curl -s -H "x-api-key: some-secret" http://127.0.0.1:8080/v1/sessions/task-1 | jq '.runs[] | {asked, tool_calls, answered, stop_reason, duration_ms}'
+curl -s -N -H "x-api-key: some-secret" http://127.0.0.1:8080/v1/sessions/task-1/live        # blocks as they open, grow and close
+curl -s -H "x-api-key: some-secret" http://127.0.0.1:8080/v1/sessions/task-1 | jq '.streams[].blocks[] | {type, started, ended}'
 curl -s -X PUT -H "x-api-key: some-secret" -H "content-type: application/json" -d '{"on": true}' http://127.0.0.1:8080/v1/killswitch/task-1
 curl -s -X PUT -H "x-api-key: some-secret" -H "content-type: application/json" -d '{"on": true}' http://127.0.0.1:8080/v1/killswitch
 ```
@@ -55,9 +72,9 @@ curl -s -X PUT -H "x-api-key: some-secret" -H "content-type: application/json" -
 
 | Module | What it is |
 |---|---|
-| `formats.py` | `Format`: how one format opens a streaming call with its SDK, reads the stream into a message for the record, and ends an interrupted stream so the message is whole. `AnthropicFormat` and `OpenAIFormat`. |
+| `formats.py` | `Format`: how one format opens a streaming call with its SDK, reads the stream's lines into the record's blocks as they arrive, and ends an interrupted stream so the message is whole. `AnthropicFormat` and `OpenAIFormat`. |
 | `providers.py` | `Provider`: a URL, a key, a format and that format's client. `Model`: an alias. |
-| `gateway.py` | `Run`, `Sessions`, `Killswitch`, and `Gateway.stream`, the loop over the stream's lines. |
+| `gateway.py` | `Stream`, `Session`, `Record` with its watchers, `Killswitch`, and `Gateway.stream`, the loop over the stream's lines. |
 | `server.py` | The endpoints. |
 | `config.py` | The TOML file, loaded into those objects. |
 

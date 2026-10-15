@@ -11,7 +11,7 @@ from fastapi.responses import JSONResponse, StreamingResponse
 
 from model_interface.config import Config
 from model_interface.formats import FORMATS
-from model_interface.gateway import Gateway, Killswitch, Sessions
+from model_interface.gateway import Gateway, Killswitch, Record
 from model_interface.providers import Model, Provider
 from model_interface.server import create_app
 
@@ -32,6 +32,7 @@ class FakeProvider:
 
     def __init__(self):
         self.text, self.tool, self.delay, self.stall = "Hello there, friend.", None, 0.0, None   # stall: (after line n, seconds of silence)
+        self.thinking = None             # a thinking (Messages) or reasoning (Chat Completions) block before the text
         self.requests, self.closed_early = [], False
         self.app = FastAPI()
         self.app.post("/v1/messages")(self.messages)
@@ -46,17 +47,25 @@ class FakeProvider:
         if body["model"] == "bad":
             return JSONResponse({"type": "error", "error": {"type": "invalid_request_error", "message": "prompt is too long"}}, status_code=400)
         events = [{"type": "message_start", "message": {"id": "msg_1", "type": "message", "role": "assistant", "model": body["model"], "content": [],
-                                                        "stop_reason": None, "stop_sequence": None, "usage": {"input_tokens": 10, "output_tokens": 0}}},
-                  {"type": "content_block_start", "index": 0, "content_block": {"type": "text", "text": ""}}]
-        events += [{"type": "content_block_delta", "index": 0, "delta": {"type": "text_delta", "text": w}} for w in self.words()]
-        events.append({"type": "content_block_stop", "index": 0})
+                                                        "stop_reason": None, "stop_sequence": None, "usage": {"input_tokens": 10, "output_tokens": 0}}}]
+        i = 0
+        if self.thinking:
+            events += [{"type": "content_block_start", "index": 0, "content_block": {"type": "thinking", "thinking": "", "signature": ""}},
+                       {"type": "ping"},
+                       {"type": "content_block_delta", "index": 0, "delta": {"type": "thinking_delta", "thinking": self.thinking}},
+                       {"type": "content_block_delta", "index": 0, "delta": {"type": "signature_delta", "signature": "sig_abc"}},
+                       {"type": "content_block_stop", "index": 0}]
+            i = 1
+        events.append({"type": "content_block_start", "index": i, "content_block": {"type": "text", "text": ""}})
+        events += [{"type": "content_block_delta", "index": i, "delta": {"type": "text_delta", "text": w}} for w in self.words()]
+        events.append({"type": "content_block_stop", "index": i})
         stop = "end_turn"
         if self.tool:
             args = json.dumps(self.tool[1])
-            events += [{"type": "content_block_start", "index": 1, "content_block": {"type": "tool_use", "id": "t1", "name": self.tool[0], "input": {}}},
-                       {"type": "content_block_delta", "index": 1, "delta": {"type": "input_json_delta", "partial_json": args[:6]}},
-                       {"type": "content_block_delta", "index": 1, "delta": {"type": "input_json_delta", "partial_json": args[6:]}},
-                       {"type": "content_block_stop", "index": 1}]
+            events += [{"type": "content_block_start", "index": i + 1, "content_block": {"type": "tool_use", "id": "t1", "name": self.tool[0], "input": {}}},
+                       {"type": "content_block_delta", "index": i + 1, "delta": {"type": "input_json_delta", "partial_json": args[:6]}},
+                       {"type": "content_block_delta", "index": i + 1, "delta": {"type": "input_json_delta", "partial_json": args[6:]}},
+                       {"type": "content_block_stop", "index": i + 1}]
             stop = "tool_use"
         events += [{"type": "message_delta", "delta": {"stop_reason": stop, "stop_sequence": None}, "usage": {"output_tokens": 7}}, {"type": "message_stop"}]
         return StreamingResponse(self.emit([f"event: {e['type']}\ndata: {json.dumps(e)}\n\n" for e in events]), media_type="text/event-stream")
@@ -68,6 +77,8 @@ class FakeProvider:
             return JSONResponse({"error": {"message": "prompt is too long", "type": "invalid_request_error"}}, status_code=400)
         head = {"id": "chatcmpl-1", "object": "chat.completion.chunk", "created": 1, "model": body["model"]}
         chunks = [{**head, "choices": [{"index": 0, "delta": {"role": "assistant", "content": ""}, "finish_reason": None}]}]
+        if self.thinking:
+            chunks += [{**head, "choices": [{"index": 0, "delta": {"reasoning_content": w}, "finish_reason": None}]} for w in self.thinking.replace(" ", " \x00").split("\x00")]
         chunks += [{**head, "choices": [{"index": 0, "delta": {"content": w}, "finish_reason": None}]} for w in self.words()]
         finish = "stop"
         if self.tool:
@@ -106,7 +117,7 @@ def fake():
 
 @pytest.fixture
 def provider(fake):
-    fake.text, fake.tool, fake.delay, fake.stall, fake.requests[:], fake.closed_early = "Hello there, friend.", None, 0.0, None, [], False
+    fake.text, fake.tool, fake.delay, fake.stall, fake.thinking, fake.requests[:], fake.closed_early = "Hello there, friend.", None, 0.0, None, None, [], False
     return fake
 
 
@@ -121,7 +132,7 @@ def config(provider):
 
 @pytest.fixture
 def gateway(config):
-    return Gateway(config.models, Killswitch(), Sessions(None))
+    return Gateway(config.models, Killswitch(), Record(None))
 
 
 @pytest.fixture

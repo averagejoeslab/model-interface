@@ -1,8 +1,8 @@
 """The two wire formats, each passed through by its own SDK.
 
 A Format knows how to open a streaming call with the native SDK, how to read the stream's lines
-into a message for the record, and how to end a stream early so the caller still sees a whole
-message. It never changes what goes over the wire.
+into the record's blocks as they arrive, and how to end a stream early so the caller still sees a
+whole message. It never changes what goes over the wire.
 """
 import inspect
 import json
@@ -24,12 +24,16 @@ def data_of(line: str):
 
 
 class Reading:
-    """A message, read from a stream one line at a time. Only for the record; the wire is untouched."""
+    """Reads a stream's lines into a Stream record, block by block, telling a listener as it goes.
 
-    def __init__(self):
-        self.message = {"id": None, "model": None, "content": [], "stop_reason": None, "usage": {}}
-        self.started = False       # has the stream said what message it is
-        self.open = None           # the index of a content block that hasn't closed
+    The record is the live object: a block appears when it opens, grows with each delta, and gets
+    its end time when it closes. Only the record is touched; the wire is forwarded untouched.
+    """
+
+    def __init__(self, stream, listener=lambda kind, **payload: None):
+        self.stream = stream
+        self.listener = listener
+        self.open = None                 # the block that hasn't closed yet, or None
 
     def feed(self, line: str):
         data = data_of(line)
@@ -37,6 +41,42 @@ class Reading:
             self.take(data)
 
     def take(self, data: dict): ...
+
+    # ── what every format does to the record ─────────────────────────────────
+
+    def start(self, **message):
+        self.stream.message.update(message)
+        self.listener("stream.message", message=message)
+
+    def open_block(self, type: str, **fields):
+        self.close_block()
+        block = {"index": len(self.stream.blocks), "type": type, "started": time.time(), "ended": None, **fields}
+        self.stream.blocks.append(block)
+        self.open = block
+        self.listener("block.started", block=block)
+        return block
+
+    def grow(self, field: str, piece: str):
+        if self.open is not None and piece:
+            self.open[field] = self.open.get(field, "") + piece
+            self.listener("block.delta", index=self.open["index"], field=field, delta=piece)
+
+    def close_block(self):
+        if self.open is None:
+            return
+        self.open["ended"] = time.time()
+        self.finish_block(self.open)
+        self.listener("block.ended", block=self.open)
+        self.open = None
+
+    def finish_block(self, block: dict):
+        """Anything to settle once a block is whole, such as parsing its input."""
+
+    def stop(self, reason, usage=None):
+        self.close_block()
+        self.stream.stop_reason = reason
+        if usage:
+            self.stream.usage.update(usage)
 
 
 class Format(ABC):
@@ -51,7 +91,7 @@ class Format(ABC):
         """A streaming call, as the SDK's streaming-response context manager."""
 
     @abstractmethod
-    def reading(self) -> Reading: ...
+    def reading(self, stream, listener) -> Reading: ...
 
     @abstractmethod
     def closing(self, reading: Reading) -> list[str]:
@@ -79,37 +119,43 @@ class Format(ABC):
 # ── Anthropic Messages ───────────────────────────────────────────────────────
 
 class AnthropicReading(Reading):
-    def __init__(self):
-        super().__init__()
-        self.blocks, self.partial = {}, {}
+    """Blocks are explicit on the wire: content_block_start, deltas, content_block_stop."""
+
+    def __init__(self, stream, listener):
+        super().__init__(stream, listener)
+        self.partial = ""                # a tool_use input, as JSON text, until the block closes
 
     def take(self, e):
         t = e.get("type")
         if t == "message_start":
-            self.started = True
-            self.message.update({k: e["message"].get(k) for k in ("id", "model", "usage")})
+            m = e["message"]
+            self.start(id=m.get("id"), model=m.get("model"), role=m.get("role", "assistant"))
+            self.stream.usage.update(m.get("usage") or {})
         elif t == "content_block_start":
-            self.open = e["index"]
-            self.blocks[e["index"]], self.partial[e["index"]] = dict(e["content_block"]), ""
+            b = dict(e["content_block"])
+            self.partial = ""
+            self.open_block(b.pop("type"), **b)
         elif t == "content_block_delta":
-            d, b = e["delta"], self.blocks[e["index"]]
+            d = e["delta"]
             if d["type"] == "text_delta":
-                b["text"] = b.get("text", "") + d["text"]
-            elif d["type"] == "input_json_delta":
-                self.partial[e["index"]] += d["partial_json"]
+                self.grow("text", d["text"])
             elif d["type"] == "thinking_delta":
-                b["thinking"] = b.get("thinking", "") + d["thinking"]
+                self.grow("thinking", d["thinking"])
+            elif d["type"] == "signature_delta":
+                self.grow("signature", d["signature"])
+            elif d["type"] == "input_json_delta":
+                self.partial += d["partial_json"]
+                self.listener("block.delta", index=self.open["index"], field="input", delta=d["partial_json"])
         elif t == "content_block_stop":
-            self.open = None
-            b = self.blocks[e["index"]]
-            if b["type"] == "tool_use" and self.partial[e["index"]].strip():
-                b["input"] = json.loads(self.partial[e["index"]])
+            self.close_block()
         elif t == "message_delta":
-            self.message["stop_reason"] = e["delta"].get("stop_reason")
-            self.message["usage"] = {**self.message.get("usage", {}), **e.get("usage", {})}
+            self.stop(e["delta"].get("stop_reason"), e.get("usage"))
         elif t == "error":
-            self.message["error"] = e.get("error")
-        self.message["content"] = [self.blocks[i] for i in sorted(self.blocks)]
+            self.stream.error = json.dumps(e.get("error"))
+
+    def finish_block(self, block):
+        if block["type"] == "tool_use" and self.partial.strip():
+            block["input"] = json.loads(self.partial)
 
 
 class AnthropicFormat(Format):
@@ -123,21 +169,21 @@ class AnthropicFormat(Format):
         beta = {"anthropic-beta": headers["anthropic-beta"]} if headers.get("anthropic-beta") else None
         return client.messages.with_streaming_response.create(**kwargs, stream=True, extra_body=extra, extra_headers=beta)
 
-    def reading(self):
-        return AnthropicReading()
+    def reading(self, stream, listener):
+        return AnthropicReading(stream, listener)
 
     def closing(self, reading):
         def sse(e):
             return f"event: {e['type']}\ndata: {json.dumps(e)}\n\n"
         out = []
-        if not reading.started:
+        if not reading.stream.message:
             out.append(sse({"type": "message_start", "message": {"id": f"msg_{uuid.uuid4().hex[:12]}", "type": "message", "role": "assistant",
-                                                                 "model": reading.message.get("model") or "", "content": [], "stop_reason": None,
-                                                                 "stop_sequence": None, "usage": {"input_tokens": 0, "output_tokens": 0}}}))
+                                                                 "model": "", "content": [], "stop_reason": None, "stop_sequence": None,
+                                                                 "usage": {"input_tokens": 0, "output_tokens": 0}}}))
         if reading.open is not None:
-            out.append(sse({"type": "content_block_stop", "index": reading.open}))
+            out.append(sse({"type": "content_block_stop", "index": reading.open["index"]}))
         out.append(sse({"type": "message_delta", "delta": {"stop_reason": "interrupted", "stop_sequence": None},
-                        "usage": {"output_tokens": reading.message.get("usage", {}).get("output_tokens", 0)}}))
+                        "usage": {"output_tokens": reading.stream.usage.get("output_tokens", 0)}}))
         out.append(sse({"type": "message_stop"}))
         return out
 
@@ -148,40 +194,40 @@ class AnthropicFormat(Format):
 # ── OpenAI Chat Completions ──────────────────────────────────────────────────
 
 class OpenAIReading(Reading):
+    """Blocks are inferred: a run of content, of reasoning, or of one tool call's arguments."""
+
     STOP = {"tool_calls": "tool_use", "length": "max_tokens", "stop": "end_turn"}
 
-    def __init__(self):
-        super().__init__()
-        self.text, self.calls = "", {}
+    def __init__(self, stream, listener):
+        super().__init__(stream, listener)
+        self.calls = {}                  # the provider's tool call index -> our block
 
     def take(self, c):
-        if not self.started:
-            self.started = True
-            self.message.update({"id": c.get("id"), "model": c.get("model")})
+        if not self.stream.message and (c.get("id") or c.get("model")):
+            self.start(id=c.get("id"), model=c.get("model"), role="assistant")
         if c.get("usage"):
-            self.message["usage"] = {"input_tokens": c["usage"].get("prompt_tokens", 0), "output_tokens": c["usage"].get("completion_tokens", 0)}
+            self.stream.usage.update({"input_tokens": c["usage"].get("prompt_tokens", 0), "output_tokens": c["usage"].get("completion_tokens", 0)})
         for choice in c.get("choices") or []:
             delta = choice.get("delta") or {}
+            if delta.get("reasoning_content"):
+                if not (self.open and self.open["type"] == "reasoning"):
+                    self.open_block("reasoning", reasoning="")
+                self.grow("reasoning", delta["reasoning_content"])
             if delta.get("content"):
-                self.text += delta["content"]
-                self.open = 0
+                if not (self.open and self.open["type"] == "content"):
+                    self.open_block("content", content="")
+                self.grow("content", delta["content"])
             for call in delta.get("tool_calls") or []:
-                entry = self.calls.setdefault(call.get("index", 0), {"type": "tool_use", "id": call.get("id"), "name": None, "arguments": ""})
-                entry["id"] = entry["id"] or call.get("id")
-                entry["name"] = entry["name"] or call.get("function", {}).get("name")
-                entry["arguments"] += call.get("function", {}).get("arguments") or ""
+                i = call.get("index", 0)
+                if i not in self.calls:
+                    self.calls[i] = self.open_block("tool_call", call_index=i, id=call.get("id"), name=call.get("function", {}).get("name"), arguments="")
+                block = self.calls[i]
+                block["id"] = block["id"] or call.get("id")
+                block["name"] = block["name"] or call.get("function", {}).get("name")
+                self.grow("arguments", call.get("function", {}).get("arguments") or "")
             if choice.get("finish_reason"):
-                self.message["stop_reason"] = self.STOP.get(choice["finish_reason"], choice["finish_reason"])
-                self.open = None
-        content = [{"type": "text", "text": self.text}] if self.text else []
-        for i in sorted(self.calls):
-            call = self.calls[i]
-            try:
-                arguments = json.loads(call["arguments"]) if call["arguments"].strip() else {}
-            except ValueError:
-                arguments = {"_partial": call["arguments"]}
-            content.append({"type": "tool_use", "id": call["id"], "name": call["name"], "input": arguments})
-        self.message["content"] = content
+                self.stop(self.STOP.get(choice["finish_reason"], choice["finish_reason"]))
+                self.stream.finish_reason = choice["finish_reason"]
 
 
 class OpenAIFormat(Format):
@@ -194,12 +240,12 @@ class OpenAIFormat(Format):
         kwargs, extra = self._split(client.chat.completions.create, body)
         return client.chat.completions.with_streaming_response.create(**kwargs, stream=True, extra_body=extra)
 
-    def reading(self):
-        return OpenAIReading()
+    def reading(self, stream, listener):
+        return OpenAIReading(stream, listener)
 
     def closing(self, reading):
-        chunk = {"id": reading.message.get("id") or f"chatcmpl-{uuid.uuid4().hex[:12]}", "object": "chat.completion.chunk",
-                 "created": int(time.time()), "model": reading.message.get("model") or "", "interrupted": True,
+        chunk = {"id": reading.stream.message.get("id") or f"chatcmpl-{uuid.uuid4().hex[:12]}", "object": "chat.completion.chunk",
+                 "created": int(time.time()), "model": reading.stream.message.get("model") or "", "interrupted": True,
                  "choices": [{"index": 0, "delta": {}, "finish_reason": "stop"}]}
         return [f"data: {json.dumps(chunk)}\n\n", "data: [DONE]\n\n"]
 

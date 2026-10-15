@@ -1,6 +1,6 @@
 # Copy to model-interface.toml. Values written as "env:NAME" are read from the environment.
 
-record = "~/.model-interface/runs.jsonl"     # one line per run: request, response, timings
+record = "~/.model-interface/streams.jsonl"  # one line per finished stream: request, blocks, timings
 
 [keys]                                 # what callers present, by name; never a provider's key
 team-a = "env:MI_KEY"

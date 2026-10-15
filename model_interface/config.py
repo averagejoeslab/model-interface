@@ -14,7 +14,7 @@ from .providers import Model, Provider
 class Config:
     models: dict[str, Model]
     keys: dict[str, str]             # a caller's key -> its name; none of them is a provider's
-    record: str | None = "~/.model-interface/runs.jsonl"
+    record: str | None = "~/.model-interface/streams.jsonl"
 
 
 def secret(value: str) -> str:
