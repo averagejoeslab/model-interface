@@ -28,9 +28,11 @@ class DockerSandbox(Sandbox):
         if subprocess.run(["docker", "inspect", self.name], capture_output=True).returncode == 0:
             return
         os.makedirs(self.workspace, exist_ok=True)
-        subprocess.run(["docker", "run", "-d", "--name", self.name, "--network", "none",
-                        "-v", f"{self.workspace}:/work", "-w", "/work", self.image, "sleep", "infinity"],
-                       check=True, capture_output=True)
+        started = subprocess.run(["docker", "run", "-d", "--name", self.name, "--network", "none",
+                                  "-v", f"{self.workspace}:/work", "-w", "/work", self.image, "sleep", "infinity"],
+                                 capture_output=True, text=True)
+        if started.returncode:
+            raise RuntimeError(f"the sandbox for {self.name} didn't start: {started.stderr.strip()}")
 
     def run(self, cmd, timeout=60):
         self.start()
