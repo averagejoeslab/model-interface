@@ -1,0 +1,30 @@
+# Copy to model-interface.toml. Values written as "env:NAME" are read from the environment.
+
+keys = ["env:MI_KEY"]                  # what callers present; never a provider's key. Keep this line above the tables.
+
+[providers.anthropic]
+format = "anthropic"
+url = "https://api.anthropic.com"
+key = "env:ANTHROPIC_API_KEY"
+
+[providers.groq]
+format = "openai"
+url = "https://api.groq.com/openai/v1"
+key = "env:GROQ_API_KEY"
+
+[providers.local]
+format = "openai"
+url = "http://localhost:11434/v1"      # Ollama; no key needed
+
+[models]                               # the aliases callers use
+coder = { provider = "anthropic", model = "claude-sonnet-5-5" }
+fast = { provider = "groq", model = "llama-3.3-70b-versatile" }
+local = { provider = "local", model = "qwen2.5-coder" }
+
+[tools]                                # what the model may do, run here in the session's sandbox
+shell = { kind = "shell" }
+
+[sandbox]
+image = "python:3.13@sha256:f758b6ca6fd1a733d6d50584acca528421c0d86d260107ede3f14ba1928b1343"
+workspaces = "~/.model-interface/workspaces"
+
