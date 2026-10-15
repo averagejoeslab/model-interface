@@ -1,21 +1,20 @@
-"""The endpoints: two for model calls, in either format, and a few to watch and stop them."""
+"""The endpoints: one per format, streaming only, plus sessions and the killswitch."""
 import itertools
 import re
 
-import httpx
-from fastapi import FastAPI, Header, HTTPException
+from fastapi import FastAPI, Header, HTTPException, Request
 from fastapi.responses import JSONResponse, StreamingResponse
 
 from .config import Config
-from .formats import FORMATS, Format, assemble
-from .gateway import Gateway, Record, Run, Stops
+from .formats import FORMATS, Format
+from .gateway import Gateway, Killswitch, Run, Sessions
 
-SESSION = r"[A-Za-z0-9][A-Za-z0-9._-]{0,63}"
+SESSION = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,63}")
 
 
 def create_app(config: Config, gateway: Gateway | None = None) -> FastAPI:
     app = FastAPI(title="model-interface")
-    gateway = gateway or Gateway(config.models, Stops(), Record(config.record))
+    gateway = gateway or Gateway(config.models, Killswitch(), Sessions(config.record))
 
     def authorize(x_api_key: str, authorization: str) -> str:
         key = x_api_key or authorization.removeprefix("Bearer ").strip()
@@ -23,53 +22,82 @@ def create_app(config: Config, gateway: Gateway | None = None) -> FastAPI:
             raise HTTPException(401, "unknown key")
         return config.keys[key]
 
-    def serve(format: Format, body: dict, key: str, session: str):
-        if not re.fullmatch(SESSION, session):
+    def serve(format: Format, body: dict, key: str, session: str, headers: dict):
+        if not body.get("stream"):
+            raise HTTPException(400, "this gateway streams only: send stream=true")
+        if not SESSION.fullmatch(session):
             raise HTTPException(400, "X-Session must be letters, digits, dots, dashes or underscores")
-        request = format.request_in(body)
-        if request.get("model") not in config.models:
-            raise HTTPException(404, f"unknown model {request.get('model')!r}")
-        run = Run(session=session, key=key, model=request["model"], format=format.name, stream=bool(body.get("stream")))
-        events = gateway.stream(run, request)
-        first = next(events, None)                       # the provider's refusal, if any, surfaces here
-        if first is None:
+        model = config.models.get(body.get("model"))
+        if model is None:
+            raise HTTPException(404, f"unknown model {body.get('model')!r}")
+        if model.provider.format is not format:
+            raise HTTPException(400, f"{body['model']!r} speaks {model.provider.format.name}; use {model.provider.format.endpoint}")
+        if gateway.killswitch.is_on(session):
+            raise HTTPException(423, f"the killswitch is on for {'everything' if gateway.killswitch.all else session}")
+        run = Run(session=session, key=key, model=body["model"], format=format.name, request=body)
+        lines = gateway.stream(run, headers)
+        try:
+            first = next(lines)                        # the provider's refusal, if any, surfaces here
+        except StopIteration:
             raise HTTPException(502, "the provider sent nothing")
-        if first["type"] == "error":
-            raise HTTPException(502, f"the provider failed: {run.error}")
-        events = itertools.chain([first], events)
-        headers = {"X-Run": run.id, "X-Session": session}
-        if run.stream:
-            return StreamingResponse(format.events_out(events), media_type="text/event-stream", headers=headers)
-        return JSONResponse(format.response_out(assemble(events)), headers=headers)
+        except Exception as e:
+            status = format.status_of(e)
+            if status:
+                return JSONResponse(status[1], status_code=status[0])
+            raise HTTPException(502, f"the provider failed: {e}")
+        return StreamingResponse(itertools.chain([first], lines), media_type="text/event-stream",
+                                 headers={"X-Run": run.id, "X-Session": session})
 
     @app.post("/v1/messages")
-    def messages(body: dict, x_api_key: str = Header(""), authorization: str = Header(""), x_session: str = Header("default")):
-        return serve(FORMATS["anthropic"], body, authorize(x_api_key, authorization), x_session)
+    def messages(body: dict, request: Request, x_api_key: str = Header(""), authorization: str = Header(""), x_session: str = Header("default")):
+        return serve(FORMATS["anthropic"], body, authorize(x_api_key, authorization), x_session, dict(request.headers))
 
     @app.post("/v1/chat/completions")
-    def chat_completions(body: dict, x_api_key: str = Header(""), authorization: str = Header(""), x_session: str = Header("default")):
-        return serve(FORMATS["openai"], body, authorize(x_api_key, authorization), x_session)
+    def chat_completions(body: dict, request: Request, x_api_key: str = Header(""), authorization: str = Header(""), x_session: str = Header("default")):
+        return serve(FORMATS["openai"], body, authorize(x_api_key, authorization), x_session, dict(request.headers))
 
     @app.get("/v1/models")
     def models(x_api_key: str = Header(""), authorization: str = Header("")):
         authorize(x_api_key, authorization)
-        return {"object": "list", "data": [{"id": alias, "object": "model"} for alias in config.models]}
+        return {"object": "list", "data": [{"id": alias, "object": "model", "format": m.provider.format.name} for alias, m in config.models.items()]}
 
-    @app.get("/v1/runs")
-    def runs(session: str | None = None, limit: int = 50, x_api_key: str = Header(""), authorization: str = Header("")):
-        authorize(x_api_key, authorization)
-        return {"data": gateway.record.runs(session, limit)}
+    # ── observability: sessions and runs ─────────────────────────────────────
 
-    @app.post("/v1/interrupt/{scope}")                   # a run id, a session, a key name, or * for everything
-    def interrupt(scope: str, x_api_key: str = Header(""), authorization: str = Header("")):
+    @app.get("/v1/sessions")
+    def sessions(x_api_key: str = Header(""), authorization: str = Header("")):
         authorize(x_api_key, authorization)
-        gateway.stops.add(scope)
-        return {"stopped": sorted(gateway.stops.scopes)}
+        return {"data": gateway.sessions.list()}
 
-    @app.delete("/v1/interrupt/{scope}")
-    def resume(scope: str, x_api_key: str = Header(""), authorization: str = Header("")):
+    @app.get("/v1/sessions/{session}")
+    def session(session: str, x_api_key: str = Header(""), authorization: str = Header("")):
         authorize(x_api_key, authorization)
-        gateway.stops.remove(scope)
-        return {"stopped": sorted(gateway.stops.scopes)}
+        return {"session": session, "runs": gateway.sessions.get(session)}
+
+    @app.get("/v1/runs/{run}")
+    def run(run: str, x_api_key: str = Header(""), authorization: str = Header("")):
+        authorize(x_api_key, authorization)
+        line = gateway.sessions.run(run)
+        if line is None:
+            raise HTTPException(404, "no such run")
+        return line
+
+    # ── the killswitch: a flag for everything, and one per session ───────────
+
+    @app.get("/v1/killswitch")
+    def killswitch(x_api_key: str = Header(""), authorization: str = Header("")):
+        authorize(x_api_key, authorization)
+        return gateway.killswitch.state()
+
+    @app.put("/v1/killswitch")
+    def killswitch_all(body: dict, x_api_key: str = Header(""), authorization: str = Header("")):
+        authorize(x_api_key, authorization)
+        gateway.killswitch.set(bool(body.get("on")))
+        return gateway.killswitch.state()
+
+    @app.put("/v1/killswitch/{session}")
+    def killswitch_session(session: str, body: dict, x_api_key: str = Header(""), authorization: str = Header("")):
+        authorize(x_api_key, authorization)
+        gateway.killswitch.set(bool(body.get("on")), session)
+        return gateway.killswitch.state()
 
     return app

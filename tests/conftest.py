@@ -1,83 +1,129 @@
-"""Fakes: a provider that plays a script of events, slowly if asked, and a server on a real port."""
-import copy
+"""A fake provider that speaks both formats over real HTTP, and the gateway on a real port in front of it."""
+import json
 import socket
 import threading
 import time
 
 import pytest
 import uvicorn
+from fastapi import FastAPI, Request
+from fastapi.responses import JSONResponse, StreamingResponse
 
 from model_interface.config import Config
 from model_interface.formats import FORMATS
-from model_interface.gateway import Gateway, Record, Stops
+from model_interface.gateway import Gateway, Killswitch, Sessions
 from model_interface.providers import Model, Provider
 from model_interface.server import create_app
 
 
-def events_for(text="Hello there, friend.", tool=None, stop="end_turn", model="fake"):
-    """The canonical events of one answer: text word by word, then an optional tool call."""
-    out = [{"type": "message_start", "message": {"id": "msg_1", "type": "message", "role": "assistant", "model": model,
-                                                 "content": [], "stop_reason": None, "stop_sequence": None, "usage": {"input_tokens": 10, "output_tokens": 0}}},
-           {"type": "content_block_start", "index": 0, "content_block": {"type": "text", "text": ""}}]
-    out += [{"type": "content_block_delta", "index": 0, "delta": {"type": "text_delta", "text": w}} for w in text.replace(" ", " \x00").split("\x00")]
-    out.append({"type": "content_block_stop", "index": 0})
-    if tool:
-        out += [{"type": "content_block_start", "index": 1, "content_block": {"type": "tool_use", "id": "t1", "name": tool[0], "input": {}}},
-                {"type": "content_block_delta", "index": 1, "delta": {"type": "input_json_delta", "partial_json": tool[1][:5]}},
-                {"type": "content_block_delta", "index": 1, "delta": {"type": "input_json_delta", "partial_json": tool[1][5:]}},
-                {"type": "content_block_stop", "index": 1}]
-        stop = "tool_use"
-    out += [{"type": "message_delta", "delta": {"stop_reason": stop, "stop_sequence": None}, "usage": {"output_tokens": 7}},
-            {"type": "message_stop"}]
-    return out
+def serve(app):
+    with socket.socket() as s:
+        s.bind(("127.0.0.1", 0))
+        port = s.getsockname()[1]
+    srv = uvicorn.Server(uvicorn.Config(app, host="127.0.0.1", port=port, log_level="warning"))
+    threading.Thread(target=srv.run, daemon=True).start()
+    while not srv.started:
+        time.sleep(0.02)
+    return srv, f"http://127.0.0.1:{port}"
 
 
-class FakeProvider(Provider):
-    """Plays a script of events, keeps every request, and knows when it was closed."""
+class FakeProvider:
+    """Answers in whichever format was asked, word by word, and notices when the caller hangs up."""
 
-    def __init__(self, events=None, delay=0.0):
-        super().__init__("fake", FORMATS["anthropic"], "http://fake", "")
-        self.script, self.delay, self.seen, self.closed, self.sent = list(events or events_for()), delay, [], False, 0
+    def __init__(self):
+        self.text, self.tool, self.delay = "Hello there, friend.", None, 0.0
+        self.requests, self.closed_early = [], False
+        self.app = FastAPI()
+        self.app.post("/v1/messages")(self.messages)
+        self.app.post("/v1/chat/completions")(self.chat)
 
-    def stream(self, request):
-        self.seen.append(copy.deepcopy(request))
-        self.closed, self.sent = False, 0
+    def words(self):
+        return self.text.replace(" ", " \x00").split("\x00")
+
+    async def messages(self, request: Request):
+        body = await request.json()
+        self.requests.append({"path": "/v1/messages", "headers": dict(request.headers), "body": body})
+        if body["model"] == "bad":
+            return JSONResponse({"type": "error", "error": {"type": "invalid_request_error", "message": "prompt is too long"}}, status_code=400)
+        events = [{"type": "message_start", "message": {"id": "msg_1", "type": "message", "role": "assistant", "model": body["model"], "content": [],
+                                                        "stop_reason": None, "stop_sequence": None, "usage": {"input_tokens": 10, "output_tokens": 0}}},
+                  {"type": "content_block_start", "index": 0, "content_block": {"type": "text", "text": ""}}]
+        events += [{"type": "content_block_delta", "index": 0, "delta": {"type": "text_delta", "text": w}} for w in self.words()]
+        events.append({"type": "content_block_stop", "index": 0})
+        stop = "end_turn"
+        if self.tool:
+            args = json.dumps(self.tool[1])
+            events += [{"type": "content_block_start", "index": 1, "content_block": {"type": "tool_use", "id": "t1", "name": self.tool[0], "input": {}}},
+                       {"type": "content_block_delta", "index": 1, "delta": {"type": "input_json_delta", "partial_json": args[:6]}},
+                       {"type": "content_block_delta", "index": 1, "delta": {"type": "input_json_delta", "partial_json": args[6:]}},
+                       {"type": "content_block_stop", "index": 1}]
+            stop = "tool_use"
+        events += [{"type": "message_delta", "delta": {"stop_reason": stop, "stop_sequence": None}, "usage": {"output_tokens": 7}}, {"type": "message_stop"}]
+        return StreamingResponse(self.emit([f"event: {e['type']}\ndata: {json.dumps(e)}\n\n" for e in events]), media_type="text/event-stream")
+
+    async def chat(self, request: Request):
+        body = await request.json()
+        self.requests.append({"path": "/v1/chat/completions", "headers": dict(request.headers), "body": body})
+        if body["model"] == "bad":
+            return JSONResponse({"error": {"message": "prompt is too long", "type": "invalid_request_error"}}, status_code=400)
+        head = {"id": "chatcmpl-1", "object": "chat.completion.chunk", "created": 1, "model": body["model"]}
+        chunks = [{**head, "choices": [{"index": 0, "delta": {"role": "assistant", "content": ""}, "finish_reason": None}]}]
+        chunks += [{**head, "choices": [{"index": 0, "delta": {"content": w}, "finish_reason": None}]} for w in self.words()]
+        finish = "stop"
+        if self.tool:
+            args = json.dumps(self.tool[1])
+            chunks += [{**head, "choices": [{"index": 0, "delta": {"tool_calls": [{"index": 0, "id": "call_1", "type": "function", "function": {"name": self.tool[0], "arguments": ""}}]}, "finish_reason": None}]},
+                       {**head, "choices": [{"index": 0, "delta": {"tool_calls": [{"index": 0, "function": {"arguments": args[:6]}}]}, "finish_reason": None}]},
+                       {**head, "choices": [{"index": 0, "delta": {"tool_calls": [{"index": 0, "function": {"arguments": args[6:]}}]}, "finish_reason": None}]}]
+            finish = "tool_calls"
+        chunks += [{**head, "choices": [{"index": 0, "delta": {}, "finish_reason": finish}]},
+                   {**head, "choices": [], "usage": {"prompt_tokens": 10, "completion_tokens": 7, "total_tokens": 17}}]
+        return StreamingResponse(self.emit([f"data: {json.dumps(c)}\n\n" for c in chunks] + ["data: [DONE]\n\n"]), media_type="text/event-stream")
+
+    async def emit(self, lines):
+        import asyncio
+        self.closed_early, sent = False, 0
         try:
-            for e in self.script:
+            for line in lines:
                 if self.delay:
-                    time.sleep(self.delay)
-                self.sent += 1
-                yield e
+                    await asyncio.sleep(self.delay)
+                yield line
+                sent += 1
         finally:
-            self.closed = True
+            self.closed_early = sent < len(lines)
+
+
+@pytest.fixture(scope="session")
+def fake():
+    provider = FakeProvider()
+    srv, url = serve(provider.app)
+    provider.url = url
+    yield provider
+    srv.should_exit = True
 
 
 @pytest.fixture
-def provider():
-    return FakeProvider()
+def provider(fake):
+    fake.text, fake.tool, fake.delay, fake.requests[:], fake.closed_early = "Hello there, friend.", None, 0.0, [], False
+    return fake
 
 
 @pytest.fixture
 def config(provider):
-    return Config(models={"coder": Model("coder", provider, "fake-model")}, keys={"mi-test-key": "team-test"}, record=None)
+    anthropic = Provider("fake-anthropic", FORMATS["anthropic"], provider.url, "")
+    openai = Provider("fake-openai", FORMATS["openai"], provider.url + "/v1", "")
+    return Config(models={"coder": Model("coder", anthropic, "fake-sonnet"), "gpt": Model("gpt", openai, "fake-gpt"),
+                          "broken": Model("broken", anthropic, "bad"), "broken-gpt": Model("broken-gpt", openai, "bad")},
+                  keys={"mi-test-key": "team-test"}, record=None)
 
 
 @pytest.fixture
 def gateway(config):
-    return Gateway(config.models, Stops(), Record(None))
+    return Gateway(config.models, Killswitch(), Sessions(None))
 
 
 @pytest.fixture
 def server(config, gateway):
-    """The real app on a real port, so streams are live and can be interrupted mid-way."""
-    with socket.socket() as s:
-        s.bind(("127.0.0.1", 0))
-        port = s.getsockname()[1]
-    srv = uvicorn.Server(uvicorn.Config(create_app(config, gateway), host="127.0.0.1", port=port, log_level="warning"))
-    threading.Thread(target=srv.run, daemon=True).start()
-    for _ in range(100):
-        if srv.started:
-            break
-        time.sleep(0.02)
-    yield f"http://127.0.0.1:{port}"
+    srv, url = serve(create_app(config, gateway))
+    yield url
     srv.should_exit = True

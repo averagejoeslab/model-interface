@@ -1,8 +1,7 @@
-"""The gateway: one model call at a time, watched and stoppable.
+"""The gateway: one streaming call at a time, passed through, recorded, and under the killswitch.
 
-A Run is one call. The Gateway streams it from the provider and, on every event, checks the
-stop list and updates the run's record. Stopping closes the upstream connection, which makes the
-provider stop generating, and ends the caller's stream cleanly with stop_reason "interrupted".
+A Run is one call. Runs belong to sessions. The killswitch is a flag per session and one for
+everything; while a flag is on, a running stream is cut at its next line and new calls are refused.
 """
 import collections
 import datetime
@@ -13,127 +12,136 @@ import time
 import uuid
 from dataclasses import dataclass, field
 
-import httpx
-
+from .formats import Format
 from .providers import Model
 
 
 @dataclass
 class Run:
     session: str
-    key: str                         # the caller's key, by name
-    model: str                       # the alias
-    format: str                      # the caller's wire format
-    stream: bool                     # whether the caller asked for a stream
+    key: str                               # the caller's key, by name
+    model: str                             # the alias
+    format: str
+    request: dict                          # the body as received
     id: str = field(default_factory=lambda: f"run_{uuid.uuid4().hex[:12]}")
     started_at: float = field(default_factory=time.time)
-    first_event_at: float | None = None
+    first_line_at: float | None = None
     ended_at: float | None = None
-    events: int = 0
-    usage: dict = field(default_factory=dict)
-    stop_reason: str | None = None
+    lines: int = 0
+    response: dict = field(default_factory=dict)   # the message, as read from the stream
     interrupted: bool = False
     error: str | None = None
-
-    @property
-    def scopes(self) -> set:
-        return {self.id, self.session, self.key, "*"}
 
     def record(self) -> dict:
         ms = lambda t: round((t - self.started_at) * 1000) if t else None
         return {"run": self.id, "session": self.session, "key": self.key, "model": self.model, "format": self.format,
-                "stream": self.stream, "started": datetime.datetime.fromtimestamp(self.started_at).isoformat(timespec="milliseconds"),
-                "first_event_ms": ms(self.first_event_at), "duration_ms": ms(self.ended_at), "events": self.events,
-                "usage": self.usage, "stop_reason": self.stop_reason, "interrupted": self.interrupted, "error": self.error}
+                "started": datetime.datetime.fromtimestamp(self.started_at).isoformat(timespec="milliseconds"),
+                "first_line_ms": ms(self.first_line_at), "duration_ms": ms(self.ended_at), "lines": self.lines,
+                "stop_reason": self.response.get("stop_reason"), "usage": self.response.get("usage", {}),
+                "interrupted": self.interrupted, "error": self.error, "request": self.request, "response": self.response}
 
 
-class Stops:
-    """Scopes that are stopped: a run id, a session, a key name, or "*" for everything."""
+class Killswitch:
+    """Flags: one per session, and one for everything. On means cut and refuse; off means run."""
 
     def __init__(self):
-        self.scopes = set()
+        self.all = False
+        self.sessions = set()
 
-    def add(self, scope: str):
-        self.scopes.add(scope)
+    def set(self, on: bool, session: str | None = None):
+        if session is None:
+            self.all = on
+        elif on:
+            self.sessions.add(session)
+        else:
+            self.sessions.discard(session)
 
-    def remove(self, scope: str):
-        self.scopes.discard(scope)
+    def is_on(self, session: str) -> bool:
+        return self.all or session in self.sessions
 
-    def stopped(self, run: Run) -> bool:
-        return bool(self.scopes & run.scopes)
+    def state(self) -> dict:
+        return {"all": self.all, "sessions": sorted(self.sessions)}
 
 
-class Record:
-    """One line per run, appended to a file, with the recent ones kept in memory."""
+class Sessions:
+    """Every run, by session, in memory and appended to a file."""
 
-    def __init__(self, path: str | None, keep: int = 1000):
+    def __init__(self, path: str | None, keep: int = 2000):
         self.path = os.path.expanduser(path) if path else None
-        self.recent = collections.deque(maxlen=keep)
+        self.runs = collections.OrderedDict()
+        self.keep = keep
         self.lock = threading.Lock()
 
-    def write(self, run: Run):
+    def add(self, run: Run):
         line = run.record()
         with self.lock:
-            self.recent.append(line)
+            self.runs[run.id] = line
+            while len(self.runs) > self.keep:
+                self.runs.popitem(last=False)
             if self.path:
                 os.makedirs(os.path.dirname(self.path), exist_ok=True)
                 with open(self.path, "a") as f:
                     f.write(json.dumps(line) + "\n")
 
-    def runs(self, session: str | None = None, limit: int = 50) -> list:
-        lines = [r for r in self.recent if session is None or r["session"] == session]
-        return lines[-limit:][::-1]
+    @staticmethod
+    def summary(line: dict) -> dict:
+        """A run at a glance: what was asked, what came back, and the numbers."""
+        asked = next((m for m in reversed(line["request"].get("messages", [])) if m.get("role") == "user"), {})
+        content = asked.get("content", "")
+        if isinstance(content, list):
+            content = " ".join(b.get("text", "") or ("[" + b.get("type", "") + "]") for b in content)
+        answer = line["response"].get("content", [])
+        return {**{k: v for k, v in line.items() if k not in ("request", "response")},
+                "asked": content[:200],
+                "answered": "".join(b.get("text", "") for b in answer if b.get("type") == "text")[:200],
+                "tool_calls": [b.get("name") for b in answer if b.get("type") == "tool_use"]}
+
+    def list(self) -> list:
+        by = collections.OrderedDict()
+        for line in self.runs.values():
+            s = by.setdefault(line["session"], {"session": line["session"], "runs": 0, "first": line["started"], "last": None, "interrupted": 0})
+            s["runs"] += 1
+            s["last"] = line["started"]
+            s["interrupted"] += line["interrupted"]
+        return list(by.values())[::-1]
+
+    def get(self, session: str) -> list:
+        return [self.summary(l) for l in self.runs.values() if l["session"] == session]
+
+    def run(self, id: str) -> dict | None:
+        return self.runs.get(id)
 
 
 class Gateway:
-    def __init__(self, models: dict[str, Model], stops: Stops | None = None, record: Record | None = None):
+    def __init__(self, models: dict[str, Model], killswitch: Killswitch | None = None, sessions: Sessions | None = None):
         self.models = models
-        self.stops = stops or Stops()
-        self.record = record or Record(None)
+        self.killswitch = killswitch or Killswitch()
+        self.sessions = sessions or Sessions(None)
 
-    def stream(self, run: Run, request: dict):
-        """The run's canonical events, watched. Ends early, cleanly, if the run is stopped."""
-        upstream = self.models[run.model].stream(request)
-        started, open_block = False, None
+    def stream(self, run: Run, headers: dict):
+        """The provider's stream, line by line, verbatim. Cut at the next line if the killswitch is on."""
+        model = self.models[run.model]
+        format: Format = model.provider.format
+        reading = format.reading()
         try:
-            for event in upstream:
-                if self.stops.stopped(run):
-                    run.interrupted = True
-                    yield from self._cut(run, started, open_block)
-                    return
-                t = event["type"]
-                run.events += 1
-                if run.first_event_at is None:
-                    run.first_event_at = time.time()
-                if t == "message_start":
-                    started = True
-                    run.usage.update(event["message"].get("usage", {}))
-                elif t == "content_block_start":
-                    open_block = event["index"]
-                elif t == "content_block_stop":
-                    open_block = None
-                elif t == "message_delta":
-                    run.stop_reason = event["delta"].get("stop_reason")
-                    run.usage.update(event.get("usage", {}))
-                yield event
+            with format.open(model.provider.client, {**run.request, "model": model.name}, headers) as upstream:
+                for line in upstream.iter_lines():
+                    if self.killswitch.is_on(run.session):
+                        run.interrupted = True
+                        reading.message["stop_reason"] = "interrupted"
+                        yield from format.closing(reading)
+                        return
+                    run.lines += 1
+                    if run.first_line_at is None:
+                        run.first_line_at = time.time()
+                    reading.feed(line)
+                    yield line + "\n"
         except Exception as e:
-            detail = e.response.text if isinstance(e, httpx.HTTPStatusError) else str(e)
-            run.error = f"{type(e).__name__}: {detail}"
-            yield {"type": "error", "error": {"type": "upstream_error", "message": detail}}
+            run.error = f"{type(e).__name__}: {e}"
+            if run.lines == 0:
+                raise                                 # before anything was sent: the server answers with the provider's status
+            yield format.error_line(str(e))
         finally:
-            upstream.close()  # the provider's connection goes with it, and so does its generation
             run.ended_at = time.time()
-            self.record.write(run)
-
-    def _cut(self, run: Run, started: bool, open_block):
-        """The events that end a stream early, so every client sees a whole message."""
-        run.stop_reason = "interrupted"
-        if not started:
-            yield {"type": "message_start", "message": {"id": run.id, "type": "message", "role": "assistant", "model": run.model,
-                                                        "content": [], "stop_reason": None, "stop_sequence": None,
-                                                        "usage": {"input_tokens": 0, "output_tokens": 0}}}
-        if open_block is not None:
-            yield {"type": "content_block_stop", "index": open_block}
-        yield {"type": "message_delta", "delta": {"stop_reason": "interrupted", "stop_sequence": None},
-               "usage": {"output_tokens": run.usage.get("output_tokens", 0)}}
-        yield {"type": "message_stop"}
+            run.response = reading.message
+            self.sessions.add(run)

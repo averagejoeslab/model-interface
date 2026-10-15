@@ -1,35 +1,33 @@
 # model-interface
 
-One endpoint for every model call, in either wire format, with the provider keys held here, every call watched, and every call stoppable while it runs.
+One gateway for model calls in both wire formats, each passed through by its own SDK, streaming only, with every call recorded under a session and a killswitch that cuts a call mid-stream.
 
-An agent points its SDK at this gateway instead of at a provider. It can be written from scratch or on any framework; the gateway never sees its loop or its tools. What it sees is every model call, and that is enough to route it, record it, and stop it. Tool execution is a separate service with the same shape, kept apart on purpose.
+An agent points its SDK at the gateway instead of at a provider. It can be written from scratch or on any framework; the gateway never sees its loop or its tools. What it sees is every model call, and that is enough to record it, group it into a session, and stop it. Tool execution is a separate service with the same shape, kept apart on purpose.
 
-## Streaming always on
-
-The gateway always streams from the provider, whatever the caller asked for.
-
-A non-streaming provider call is one blocking request: nothing arrives until the model has finished, so there is no moment to observe it and no way to stop it short. A streamed call arrives as events, one every few milliseconds. Each event is a point where the gateway can check the stop list, time the first token, count tokens, and, if told to, close the upstream connection, which makes the provider stop generating. So every upstream call streams. A caller that asked for a stream gets the events as they come. A caller that asked for a whole message gets the events assembled into one. Observability and interruptibility come from the same mechanism, and they cost the caller nothing.
-
-## What it does
+## The shape
 
 ```
-caller, in either format                  gateway                          provider
-POST /v1/messages ──────────┐
-POST /v1/chat/completions ──┤──► key? alias? ──► Run ──► stream ───────────► model
-                            │                     │   ◄── events ◄──────────┘
-                            │     on each event: stopped? record, pass on
-                            │                     │
-          events, or one ◄──┴─────────────────────┘
-          assembled message
-                                 POST /v1/interrupt/{run | session | key | *}
-                                 GET  /v1/runs?session=…
+caller                         gateway                                   provider
+POST /v1/messages ───────────► alias → model, Anthropic SDK, stream ───► Messages API
+POST /v1/chat/completions ───► alias → model, OpenAI SDK, stream ──────► Chat Completions API
+                               │
+                               │  each line of the stream:
+                               │    killswitch on?  → cut: close upstream, close the message
+                               │    read a copy     → the run's record
+                               │    forward verbatim
+                               ▼
+GET /v1/sessions, /v1/sessions/{s}, /v1/runs/{r}       what was asked, what came back, timings, tokens
+GET /v1/killswitch   PUT /v1/killswitch {on}           everything
+                     PUT /v1/killswitch/{s} {on}       one session
 ```
 
-- **Two endpoints, two formats.** Messages and Chat Completions in, either format out, with the translation done both ways, streams included.
-- **Aliases and keys.** Callers name a model alias and present a key of their own. The provider and its key are the operator's, in config, read from the environment.
-- **A run per call.** Each call gets a run id, returned in the `X-Run` header, and belongs to a session from the `X-Session` header and to the key that made it.
-- **The stop list.** Stop a run, a session, a key, or everything. A running call ends at its next event: the upstream connection closes, the caller's stream closes with `stop_reason: "interrupted"`, and the message is whole, so every SDK handles it. A stopped scope refuses new calls until resumed.
-- **The record.** One line per run: who, which model, when, time to first event, duration, events, tokens, stop reason, whether it was interrupted, any error. Kept in memory for `GET /v1/runs` and appended to a file.
+**Native pass-through.** Each endpoint serves one format and hands the body to that format's own SDK with the provider's key. The body is not translated or inspected on the way out; a field the SDK version does not know still goes through, as `extra_body`. The provider's stream lines come back to the caller verbatim. A model alias names a provider, and an alias only answers on its own format's endpoint.
+
+**Streaming only.** A call must ask for a stream, and gets a 400 otherwise. A blocking call has no moment in it to observe or to stop; a stream has one every few milliseconds, and the gateway acts at each: it reads a copy of the line for the record, checks the killswitch, and forwards it.
+
+**Sessions.** Every call is a run, with its id in the `X-Run` header, under the session named in the `X-Session` header. A run's record holds the request as received, the response as read from the stream, time to first line, duration, line count, tokens, stop reason, and whether it was cut. The sessions endpoints show a session's runs in order, so a whole task is readable turn by turn.
+
+**The killswitch.** A flag per session and one for everything. On: any running stream in scope is cut at its next line, the upstream connection closes so the provider stops generating, and the caller's stream ends with a whole message whose stop reason is `interrupted`; new calls in scope are refused with 423 until the flag is off. Off: calls run.
 
 ## Running it
 
@@ -39,39 +37,35 @@ export ANTHROPIC_API_KEY=... MI_KEY=some-secret
 uv run model-interface                                 # http://127.0.0.1:8080
 ```
 
-Any client that speaks either format then points at it:
+The minimal harness agent streams the model's words, runs its one tool itself, and keeps its own context:
 
 ```bash
-MI_URL=http://127.0.0.1:8080 MI_KEY=some-secret uv run examples/agent.py "The tests are failing. Find out why and fix it."
+MI_URL=http://127.0.0.1:8080 MI_KEY=some-secret MI_SESSION=task-1 uv run examples/agent.py "The tests are failing. Find out why and fix it."
 ```
 
-The example streams the model's words as they arrive and runs its one tool itself. To stop it from outside, in another shell:
+Watch it, and stop it, from another shell:
 
 ```bash
-curl -X POST -H "x-api-key: some-secret" http://127.0.0.1:8080/v1/interrupt/demo     # the session
-curl -X DELETE -H "x-api-key: some-secret" http://127.0.0.1:8080/v1/interrupt/demo   # let it run again
-curl -H "x-api-key: some-secret" "http://127.0.0.1:8080/v1/runs?session=demo"
+curl -s -H "x-api-key: some-secret" http://127.0.0.1:8080/v1/sessions/task-1 | jq '.runs[] | {asked, tool_calls, answered, stop_reason, duration_ms}'
+curl -s -X PUT -H "x-api-key: some-secret" -H "content-type: application/json" -d '{"on": true}' http://127.0.0.1:8080/v1/killswitch/task-1
+curl -s -X PUT -H "x-api-key: some-secret" -H "content-type: application/json" -d '{"on": true}' http://127.0.0.1:8080/v1/killswitch
 ```
 
 ## The code
 
 | Module | What it is |
 |---|---|
-| `formats.py` | `Format`: one wire format, both directions, requests and streams. `AnthropicFormat` is the canonical shape. `OpenAIFormat` translates, including chunk-to-event and event-to-chunk. `assemble` folds events into one message. |
-| `providers.py` | `Provider`: a URL, a key and a format; `stream` yields canonical events and closing it closes the connection. `Model`: an alias. |
-| `gateway.py` | `Run`, `Stops`, `Record`, and `Gateway.stream`, the loop that watches each event. |
+| `formats.py` | `Format`: how one format opens a streaming call with its SDK, reads the stream into a message for the record, and ends an interrupted stream so the message is whole. `AnthropicFormat` and `OpenAIFormat`. |
+| `providers.py` | `Provider`: a URL, a key, a format and that format's client. `Model`: an alias. |
+| `gateway.py` | `Run`, `Sessions`, `Killswitch`, and `Gateway.stream`, the loop over the stream's lines. |
 | `server.py` | The endpoints. |
 | `config.py` | The TOML file, loaded into those objects. |
 
-Tests run without keys or network, against a provider that plays a script of events, on a real port so streams are live and can be interrupted mid-way:
+Tests run without keys or network against a fake provider that speaks both formats over real HTTP, with the gateway on a real port, so streams are live and are cut mid-way by the killswitch.
 
 ```bash
 uv pip install -e ".[dev]" && pytest
 ```
-
-## Not yet
-
-Guardrails at the event points. Images and documents in messages. Thinking blocks across formats. Checkpoints. Tool execution, which belongs to a sealed execution service beside this one.
 
 ## License
 

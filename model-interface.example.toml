@@ -1,31 +1,36 @@
 # Copy to model-interface.toml. Values written as "env:NAME" are read from the environment.
 
-record = "~/.model-interface/record.jsonl"   # one line per run
+record = "~/.model-interface/runs.jsonl"     # one line per run: request, response, timings
 
 [keys]                                 # what callers present, by name; never a provider's key
 team-a = "env:MI_KEY"
 
-[providers.anthropic]                  # Claude, in Messages format
+[providers.anthropic]                  # reached with the Anthropic SDK; serves /v1/messages
 format = "anthropic"
 url = "https://api.anthropic.com"
 key = "env:ANTHROPIC_API_KEY"
 
-[providers.anthropic-openai]           # the same Claude, through Anthropic's Chat Completions compatibility endpoint
+[providers.openai]                     # reached with the OpenAI SDK; serves /v1/chat/completions
 format = "openai"
-url = "https://api.anthropic.com/v1"
-key = "env:ANTHROPIC_API_KEY"
+url = "https://api.openai.com/v1"
+key = "env:OPENAI_API_KEY"
 
 [providers.groq]
 format = "openai"
 url = "https://api.groq.com/openai/v1"
 key = "env:GROQ_API_KEY"
 
-[providers.local]                      # Ollama; no key needed
+[providers.ollama]                     # local, in Messages format; no key
+format = "anthropic"
+url = "http://localhost:11434"
+
+[providers.ollama-openai]              # the same local model, in Chat Completions format
 format = "openai"
 url = "http://localhost:11434/v1"
 
-[models]                               # the aliases callers use
+[models]                               # the aliases callers use; each speaks its provider's format
 coder = { provider = "anthropic", model = "claude-sonnet-5-5" }
-coder-openai = { provider = "anthropic-openai", model = "claude-sonnet-5-5" }
+gpt = { provider = "openai", model = "gpt-5" }
 fast = { provider = "groq", model = "llama-3.3-70b-versatile" }
-local = { provider = "local", model = "qwen2.5:3b" }
+local = { provider = "ollama", model = "qwen2.5:3b" }
+local-openai = { provider = "ollama-openai", model = "qwen2.5:3b" }
