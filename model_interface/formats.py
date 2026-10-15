@@ -49,7 +49,7 @@ class AnthropicFormat(Format):
     endpoint = "/v1/messages"
 
     def auth(self, key):
-        return {"x-api-key": key, "anthropic-version": "2023-06-01"}
+        return {"anthropic-version": "2023-06-01", **({"x-api-key": key} if key else {})}
 
     def request_in(self, body):
         return body
@@ -70,7 +70,7 @@ class OpenAIFormat(Format):
     endpoint = "/chat/completions"
 
     def auth(self, key):
-        return {"authorization": f"Bearer {key}"}
+        return {"authorization": f"Bearer {key}"} if key else {}  # a local provider may need none
 
     def request_in(self, body):
         request = {k: body[k] for k in ("model", "max_tokens", "temperature") if k in body}

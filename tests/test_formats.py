@@ -54,4 +54,9 @@ def test_anthropic_format_is_identity():
     anthropic = FORMATS["anthropic"]
     body = {"model": "coder", "messages": []}
     assert anthropic.request_in(body) is body and anthropic.response_out(body) is body
-    assert anthropic.auth("k") == {"x-api-key": "k", "anthropic-version": "2023-06-01"}
+    assert anthropic.auth("k") == {"anthropic-version": "2023-06-01", "x-api-key": "k"}
+
+
+def test_a_provider_without_a_key_gets_no_auth_header():
+    assert FORMATS["anthropic"].auth("") == {"anthropic-version": "2023-06-01"}
+    assert FORMATS["openai"].auth("") == {} and FORMATS["openai"].auth("k") == {"authorization": "Bearer k"}
