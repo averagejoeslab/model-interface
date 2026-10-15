@@ -25,6 +25,7 @@ class Loop:
         content, usage = [], {"input_tokens": 0, "output_tokens": 0}
         while True:
             response = model.complete({**request, "tools": tools, "messages": messages})
+            response["content"] = response.get("content") or []  # a provider may answer with nothing
             for k in usage:
                 usage[k] += response["usage"].get(k, 0)
             messages.append({"role": "assistant", "content": response["content"]})

@@ -54,3 +54,9 @@ def test_each_session_gets_its_own_sandbox(config):
     config.models["coder"].provider.script[:] = [reply(call("t9", cmd="pwd"), stop="tool_use"), reply(text("done"))]
     loop.run(request(), "b")
     assert config.sandboxes.get("a").ran[0] == "python3 -m unittest -q" and config.sandboxes.get("b").ran == ["pwd"]
+
+
+def test_a_provider_answering_with_no_content_ends_the_loop_cleanly(config):
+    config.models["coder"].provider.script[:] = [{**reply(), "content": None}]
+    response = Loop(config.models, config.tools, config.sandboxes).run(request(), "s1")
+    assert response["content"] == [] and response["stop_reason"] == "end_turn"
