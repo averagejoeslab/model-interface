@@ -1,54 +1,49 @@
 # /// script
 # dependencies = ["anthropic"]
 # ///
-"""An agent on the platform: it keeps its context and its input, and nothing else.
+"""An agent on the gateway: it streams the model's words as they arrive, and runs its own tools.
 
     MI_URL=http://127.0.0.1:8080 MI_KEY=... uv run examples/agent.py "The tests are failing. Find out why and fix it."
+
+The gateway holds the provider key and watches every call. The tool runs here, on this machine;
+that is the line to replace with a sealed execution service when you have one.
 """
 import os
+import subprocess
 import sys
 
 from anthropic import Anthropic
 
-client = Anthropic(base_url=os.environ["MI_URL"], api_key=os.environ["MI_KEY"])   # the platform, not a provider
-SESSION = os.environ.get("MI_SESSION", "demo")          # one sandbox on the platform, kept between turns
+client = Anthropic(base_url=os.environ["MI_URL"], api_key=os.environ["MI_KEY"])   # the gateway, not a provider
+SESSION = os.environ.get("MI_SESSION", "demo")                                   # what an operator can stop
+
+TOOLS = [{"name": "shell", "description": "Run a shell command in the current folder.",
+          "input_schema": {"type": "object", "properties": {"cmd": {"type": "string"}}, "required": ["cmd"]}}]
 
 
-# ── context ─────────────────────────────────────────────────────────────────
 def system():
-    return """You are an agent, working for the person who messages you.
-Do what you're asked, fully and correctly. Know, don't guess: check what you do by reading it back.
-Reading is always safe. Anything that changes the world happens one step at a time. If it can't be undone, ask first."""
+    return "You are an agent, working for the person who messages you. Use the shell tool to look and act. Check your work."
 
 
-# ── input ───────────────────────────────────────────────────────────────────
-def capture_input():
-    if len(sys.argv) > 1:
-        return " ".join(sys.argv[1:])
-    line = ""
-    while not line.strip():
-        line = input("< ")
-    return line
+def shell(cmd):                                          # the body: replace with a sealed call when you have one
+    print(f"$ {cmd}")
+    done = subprocess.run(cmd, shell=True, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
+    return done.stdout or f"(exit {done.returncode})"
 
 
-# ── showing what happened: nothing here runs a command ──────────────────────
-def show(content):
-    for b in content:
-        if b.type == "text":
-            print("> " + b.text.replace("\n", "\n  "))
-        if b.type == "platform_tool_use":
-            print(f"$ {b.input['cmd']}")
-        if b.type == "platform_tool_result":
-            print("  └ " + b.content.rstrip().replace("\n", "\n    "))
-
-
-# ── the outer loop: call, show, hand back ───────────────────────────────────
-messages = [{"role": "user", "content": capture_input()}]
+messages = [{"role": "user", "content": " ".join(sys.argv[1:]) or input("< ")}]
 while True:
-    response = client.messages.create(model="coder", max_tokens=16384, system=system(), tools=[{"name": "shell"}],
-                                      messages=messages, extra_headers={"X-Session": SESSION})
-    messages.append({"role": "assistant", "content": response.content})
-    show(response.content)
-    if len(sys.argv) > 1:
+    with client.messages.stream(model="coder", max_tokens=4096, system=system(), tools=TOOLS, messages=messages,
+                                extra_headers={"X-Session": SESSION}) as stream:
+        for text in stream.text_stream:
+            print(text, end="", flush=True)
+        message = stream.get_final_message()
+    print()
+    messages.append({"role": "assistant", "content": message.content})
+    if message.stop_reason == "interrupted":
+        print("[stopped by the gateway]")
         break
-    messages.append({"role": "user", "content": capture_input()})
+    calls = [b for b in message.content if b.type == "tool_use"]
+    if not calls:
+        break
+    messages.append({"role": "user", "content": [{"type": "tool_result", "tool_use_id": c.id, "content": shell(c.input["cmd"])} for c in calls]})
