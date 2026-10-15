@@ -7,6 +7,11 @@ format = "anthropic"
 url = "https://api.anthropic.com"
 key = "env:ANTHROPIC_API_KEY"
 
+[providers.anthropic-openai]          # the same Claude, through Anthropic's Chat Completions compatibility endpoint
+format = "openai"
+url = "https://api.anthropic.com/v1"
+key = "env:ANTHROPIC_API_KEY"
+
 [providers.groq]
 format = "openai"
 url = "https://api.groq.com/openai/v1"
@@ -18,6 +23,7 @@ url = "http://localhost:11434/v1"      # Ollama; no key needed
 
 [models]                               # the aliases callers use
 coder = { provider = "anthropic", model = "claude-sonnet-5-5" }
+coder-openai = { provider = "anthropic-openai", model = "claude-sonnet-5-5" }
 fast = { provider = "groq", model = "llama-3.3-70b-versatile" }
 local = { provider = "local", model = "qwen2.5-coder" }
 

@@ -92,6 +92,23 @@ Tests run without keys, against a provider that plays a script and a sandbox tha
 uv pip install -e ".[dev]" && pytest
 ```
 
+## Checking it live
+
+Two scripts in `examples/` run the platform against a real provider. With the platform started from a config that has an Anthropic key in the environment:
+
+```bash
+MI_URL=http://127.0.0.1:8080 MI_KEY=some-secret uv run examples/check.py
+```
+
+runs both caller SDKs against both aliases, Messages and Chat Completions, each in its own sandbox, and reports whether the tool ran and the file on disk is right. And with the sandbox workspaces set to `/tmp`, the harness-engineering course's own evaluation runs through the platform:
+
+```bash
+cd ../harness-engineering
+MI_URL=http://127.0.0.1:8080 MI_KEY=some-secret uv run tasks.py ../model-interface/examples/agent_eval.py
+```
+
+It scores five tasks by what happened on disk. With Claude behind the alias it passes all five.
+
 ## Not yet
 
 Streaming in either direction. Guardrails at the loop's yield points. A record of every step. Interrupts and checkpoints. Images in messages. Tools other than a shell. Each attaches to the loop as it stands; none changes its shape.
