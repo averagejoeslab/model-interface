@@ -308,3 +308,16 @@ def test_switch_changes_are_announced_on_the_feed(server):
 def test_the_page_is_served_at_the_root(server):
     page = httpx.get(f"{server}/")
     assert page.status_code == 200 and page.headers["content-type"].startswith("text/html") and "/v1/live?key=" in page.text
+
+
+def test_a_cut_in_the_middle_of_a_tool_input_still_closes_the_record_with_the_input_as_far_as_it_got(server, provider):
+    provider.tool, provider.delay = ("shell", {"cmd": "rm -rf /tmp/scratch && echo done"}), 0.05
+    flip = lambda on: httpx.put(f"{server}/v1/agents/coder/sessions/s-tool-cut/killswitch", headers=ADMIN, json={"on": on})
+    stream, seen = read_stream(server, "/v1/messages", anthropic_body(), "s-tool-cut",
+                               after=(8, lambda _: flip(True)))                   # after the tool block opened and its first input piece
+    rec = httpx.get(f"{server}/v1/streams/{stream}", headers=ADMIN).json()
+    assert rec["ended"] and rec["interrupted"]["block"]["type"] == "tool_use", rec
+    tool = rec["blocks"][-1]
+    assert tool["ended"] and isinstance(tool["input"], dict), "the cut tool's input is parsed as far as it got, not left as text or lost"
+    assert rec["response"]["stop_reason"] == "interrupted" and rec["response"]["content"][-1]["input"] == tool["input"]
+    flip(False)

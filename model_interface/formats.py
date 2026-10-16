@@ -11,6 +11,18 @@ from abc import ABC, abstractmethod
 
 import anthropic
 import openai
+from jiter import from_json
+
+
+def parse_input(partial_json: str):
+    """A tool's input from its JSON text: whole when the block closed itself, as far as it got when it was cut."""
+    try:
+        return json.loads(partial_json)
+    except ValueError:
+        try:
+            return from_json(partial_json.encode(), partial_mode="trailing-strings")
+        except ValueError:
+            return {"partial_json": partial_json}
 
 
 def data_of(line: str):
@@ -168,7 +180,7 @@ class AnthropicReading(Reading):
 
     def finish_block(self, block):
         if block["type"] == "tool_use" and self.partial.strip():
-            block["input"] = json.loads(self.partial)
+            block["input"] = parse_input(self.partial)
 
 
 class AnthropicFormat(Format):
