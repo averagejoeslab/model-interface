@@ -82,6 +82,21 @@
   .foot { display: flex; gap: 14px; padding: 8px 14px; border-top: 1px solid var(--line); color: var(--muted); font-size: 12px; font-variant-numeric: tabular-nums; flex-wrap: wrap; }
   .foot .error { color: var(--bad); }
   .foot .cut { color: var(--bad); font-weight: 600; }
+  .modes { display: flex; border: 1px solid var(--line); border-radius: 8px; overflow: hidden; }
+  .modes button { border: 0; border-radius: 0; padding: 4px 10px; font-size: 12px; background: var(--panel); color: var(--muted); }
+  .modes button.active { background: var(--accent-soft); color: var(--text); }
+  pre.tree { margin: 0; background: var(--panel); border: 1px solid var(--line); border-radius: 12px; padding: 14px 16px; font: 12.5px/1.65 var(--mono); overflow: auto; white-space: pre; }
+  .tree .guide { color: var(--line); }
+  .tree .node { font-weight: 600; }
+  .tree .level { color: var(--muted); font-weight: 400; }
+  .tree .time { color: var(--muted); }
+  .tree .on { color: var(--bad); font-weight: 600; }
+  .tree .cutmark { color: var(--bad); font-weight: 600; }
+  .tree .running { color: var(--live); }
+  .tree .preview { color: var(--muted); }
+  .tree .thinking, .tree .reasoning { color: var(--thinking); }
+  .tree .text, .tree .content { color: var(--text-block); }
+  .tree .tool_use, .tree .tool_call { color: var(--tool); }
   .hint { color: var(--muted); max-width: 560px; }
   .hint code { font-family: var(--mono); background: var(--panel); border: 1px solid var(--line); padding: 1px 5px; border-radius: 5px; }
   @media (max-width: 760px) { main { grid-template-columns: 1fr; } nav { max-height: 200px; border-right: 0; border-bottom: 1px solid var(--line); } input { width: 120px; } }
@@ -111,6 +126,8 @@
   // ── state: the record as this page knows it ───────────────────────────────
   const agents = new Map();          // name -> {agent, killswitch, sessions: Map(id -> session)}
   let selected = null, source = null, operator = false, gatewaySwitch = false;
+  let mode = "cards";                 // or "tree": the same session as one structure, a line per level
+  try { mode = localStorage.getItem("mi-mode") || "cards"; } catch (_) {}
   const $ = (id) => document.getElementById(id);
   const nav = $("nav"), view = $("view"), dot = $("dot"), keyInput = $("key"), gwSwitch = $("gw-switch");
   const esc = (s) => String(s ?? "").replace(/[&<>"]/g, (c) => ({"&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;"}[c]));
@@ -162,6 +179,8 @@
   });
   gwSwitch.onclick = () => flip(null, null, !gatewaySwitch);
   view.addEventListener("click", (e) => {
+    const m = e.target.closest(".modes button");
+    if (m) { mode = m.dataset.mode; try { localStorage.setItem("mi-mode", mode); } catch (_) {} drawSession(); return; }
     const b = e.target.closest("button.switch");
     if (b && selected) flip(selected.agent, selected.session, !selectedSession().killswitch);
   });
@@ -226,14 +245,52 @@
       <div class="foot">${drawFoot(st)}</div></article>`;
   }
   function title(s) {
-    return `<h2>${esc(s.agent)} / ${esc(s.session)}</h2><small>${s.count} stream${s.count === 1 ? "" : "s"}${s.interrupted ? ` · ${s.interrupted} cut` : ""}</small>${sw(s.killswitch, "kill session", "")}`;
+    const modes = `<span class="modes"><button data-mode="cards" class="${mode === "cards" ? "active" : ""}">cards</button><button data-mode="tree" class="${mode === "tree" ? "active" : ""}">tree</button></span>`;
+    return `<h2>${esc(s.agent)} / ${esc(s.session)}</h2><small>${s.count} stream${s.count === 1 ? "" : "s"}${s.interrupted ? ` · ${s.interrupted} cut` : ""}</small>${modes}${sw(s.killswitch, "kill session", "")}`;
+  }
+  // ── the tree: the same session as one structure, where each thing started, ended, and was stopped ──
+  function drawTree(s) {
+    const streams = [...s.streams.values()].sort((a, b) => a.started.localeCompare(b.started));
+    const cutFrom = new Set(streams.filter((st) => st.interrupted).map((st) => st.interrupted.by));
+    const a = agents.get(s.agent);
+    const when = (x, y) => `<span class="time">${clock(x)} → ${y ? clock(y) : "…"}${y ? " · " + span(x, y) : ""}</span>`;
+    const mark = (level) => cutFrom.has(level) ? `  <span class="cutmark">⚡ switch pulled here</span>` : "";
+    const state = (on) => on ? `<span class="on">switch ON</span>` : `<span class="level">switch off</span>`;
+    const preview = (b) => { const t = bodyOf(b).replace(/\s+/g, " ").trim(); return t ? `<span class="preview">${esc(t.length > 90 ? t.slice(0, 90) + "…" : t)}</span>` : ""; };
+    const lines = [];
+    lines.push(`<span class="node">gateway</span>  ${state(gatewaySwitch)}${mark("gateway")}`);
+    lines.push(`<span class="guide">└─</span> <span class="node">${esc(s.agent)}</span>  <span class="level">agent</span>  ${state(a?.killswitch)}${mark("agent")}`);
+    lines.push(`<span class="guide">   └─</span> <span class="node">${esc(s.session)}</span>  <span class="level">session</span>  ${when(s.started, s.ended)}  ${state(s.killswitch)}${mark("session")}`);
+    streams.forEach((st, i) => {
+      const lastStream = i === streams.length - 1;
+      const g1 = `<span class="guide">      ${lastStream ? "└─" : "├─"}</span>`, g2 = `<span class="guide">      ${lastStream ? "  " : "│ "}</span>`;
+      const status = st.interrupted ? `<span class="cutmark">interrupted · cut by the ${esc(st.interrupted.by)} switch at ${clock(st.interrupted.at)}</span>`
+                   : st.ended ? `<span class="level">${st.stop_reason ? "stop " + esc(st.stop_reason) : ""}${st.error ? " · error" : ""}</span>` : `<span class="running">streaming</span>`;
+      lines.push(`${g1} <span class="node">${esc(st.id)}</span>  <span class="level">stream · ${esc(st.model)} · ${esc(st.provider)}</span>  ${when(st.started, st.ended)}  ${status}`);
+      const blocks = st.blocks || [];
+      blocks.forEach((b, j) => {
+        const last = j === blocks.length - 1;
+        const landed = st.interrupted && st.interrupted.block && st.interrupted.block.index === b.index;
+        lines.push(`${g2}<span class="guide">   ${last ? "└─" : "├─"}</span> <span class="node ${esc(b.type)}">[${b.index}] ${esc(b.type)}</span>  ${when(b.started, b.ended)}${b.ended ? "" : '  <span class="running">open</span>'}${landed ? '  <span class="cutmark">✂ cut landed here</span>' : ""}`);
+        const pv = preview(b);
+        if (pv) lines.push(`${g2}<span class="guide">   ${last ? "  " : "│ "}</span>     ${pv}`);
+      });
+      if (!blocks.length) lines.push(`${g2}<span class="guide">   └─</span> <span class="level">no blocks yet</span>`);
+    });
+    return `<pre class="tree">${lines.join("\n")}</pre>`;
+  }
+  let treePending = false;
+  function redrawTree() {               // live events redraw the whole tree, at most once a frame
+    if (treePending) return;
+    treePending = true;
+    requestAnimationFrame(() => { treePending = false; const s = selectedSession(); const t = view.querySelector("pre.tree"); if (s && t) t.outerHTML = drawTree(s); });
   }
   function drawTitle() { const s = selectedSession(); const t = view.querySelector(".title"); if (s && t) t.innerHTML = title(s); }
   function drawSession() {
     const s = selectedSession();
     if (!s) { view.innerHTML = ""; return; }
     const streams = [...s.streams.values()].sort((a, b) => a.started.localeCompare(b.started));
-    view.innerHTML = `<div class="title">${title(s)}</div>` + streams.map(drawStream).join("");
+    view.innerHTML = `<div class="title">${title(s)}</div>` + (mode === "tree" ? drawTree(s) : streams.map(drawStream).join(""));
     view.scrollTop = view.scrollHeight;
   }
   const inView = (e) => selected && e.agent === selected.agent && e.session === selected.session;
@@ -248,31 +305,31 @@
       s.count += 1;
       s.ended = null;
       if (!selected) { select(e.agent, e.session); return; }
-      if (inView(e)) { drawTitle(); view.insertAdjacentHTML("beforeend", drawStream(st)); view.scrollTop = view.scrollHeight; }
+      if (inView(e)) { drawTitle(); if (mode === "tree") redrawTree(); else { view.insertAdjacentHTML("beforeend", drawStream(st)); view.scrollTop = view.scrollHeight; } }
     },
     "stream.message"(e, st) { Object.assign(st.message ||= {}, e.message); },
     "block.started"(e, st) {
       st.blocks.push(e.block);
-      if (inView(e)) { const box = el(st, ".blocks"); if (box) box.insertAdjacentHTML("beforeend", drawBlock(e.block, st)); view.scrollTop = view.scrollHeight; }
+      if (inView(e)) { if (mode === "tree") redrawTree(); else { const box = el(st, ".blocks"); if (box) box.insertAdjacentHTML("beforeend", drawBlock(e.block, st)); view.scrollTop = view.scrollHeight; } }
     },
     "block.delta"(e, st) {
       const b = st.blocks[e.index]; if (!b) return;
       b[e.field] = (b[e.field] || "") + e.delta;
-      if (inView(e) && e.field !== "signature") { const body = el(st, `.block[data-index="${e.index}"] .body`); if (body) body.textContent = bodyOf(b); }
+      if (inView(e) && e.field !== "signature") { if (mode === "tree") redrawTree(); else { const body = el(st, `.block[data-index="${e.index}"] .body`); if (body) body.textContent = bodyOf(b); } }
     },
     "block.ended"(e, st) {
       st.blocks[e.block.index] = e.block;
-      if (inView(e)) { const node = el(st, `.block[data-index="${e.block.index}"]`); if (node) node.outerHTML = drawBlock(e.block, st); }
+      if (inView(e)) { if (mode === "tree") redrawTree(); else { const node = el(st, `.block[data-index="${e.block.index}"]`); if (node) node.outerHTML = drawBlock(e.block, st); } }
     },
     "stream.ended"(e, st) {
       Object.assign(st, e.snapshot, {blocks: st.blocks, request: st.request});
       const s = session(e.agent, e.session, st.started);
       if ([...s.streams.values()].every((x) => x.ended)) s.ended = st.ended;
       if (st.interrupted) s.interrupted += 1;
-      if (inView(e)) { drawTitle(); const node = document.getElementById(`st-${st.id}`); if (node) node.outerHTML = drawStream(st); }
+      if (inView(e)) { drawTitle(); if (mode === "tree") redrawTree(); else { const node = document.getElementById(`st-${st.id}`); if (node) node.outerHTML = drawStream(st); } }
       drawNav();
     },
-    "killswitch"(e) { applySwitches(e.state); drawNav(); drawTitle(); },
+    "killswitch"(e) { applySwitches(e.state); drawNav(); drawTitle(); if (mode === "tree") redrawTree(); },
   };
   function apply(e) {
     if (e.type === "killswitch") { handlers.killswitch(e); return; }
