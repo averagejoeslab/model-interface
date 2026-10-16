@@ -206,7 +206,7 @@ class Gateway:
                 level = self.killswitch.scope_of(stream.agent, stream.session)
                 if level:
                     stream.interrupted = {"by": level, "at": iso(time.time()),
-                                          "block": {"index": reading.open["index"], "type": reading.open["type"]} if reading.open else None}
+                                          "block": {"at": reading.open["at"], "type": reading.open.get("type")} if reading.open else None}
                     yield from format.closing(reading)
                     reading.stop("interrupted")
                     return
@@ -226,7 +226,7 @@ class Gateway:
             yield format.error_line(str(e))
         finally:
             self._hang_up(opened.get("response"))      # the provider's connection goes, and so does its generation
-            reading.close_block()
+            reading.close_piece()
             stream.ended = time.time()
             self.record.close(stream)
 

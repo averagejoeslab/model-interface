@@ -69,18 +69,20 @@ Every level has an id, a start and an end.
 
 **Session.** `agent`, `session`, `started` at its first stream, `ended` when its last stream ended, `streams`, `interrupted`, `killswitch`.
 
-**Stream.** One connection to the provider: `started` when it opened, `ended` when it closed. Two bodies, both in the provider's format: `request` exactly as received, and `response` as a non-streaming call would have returned it, assembled from the stream: in Messages the message with its `content`, `stop_reason`, `stop_sequence` and `usage`; in Chat Completions the completion with one choice, its `message` (`content`, `reasoning_content`, `tool_calls`), `finish_reason` and `usage`. Nothing in `response` is renamed. Then `blocks[]`, the response's content as it streamed, piece by piece, with times. Then the gateway's own fields: `id`, `agent`, `session`, `provider`, `model`, `format`, `interrupted` (`null`, or `by` the level that cut it, `at` when, and the `block` it landed in), `error`. A cut stream's response ends with the reason `interrupted`.
+**Stream.** One connection to the provider: `started` when it opened, `ended` when it closed. Two bodies, both in the provider's format: `request` exactly as received, and `response` as a non-streaming call would have returned it, assembled from the stream: in Messages the message with its `content`, `stop_reason`, `stop_sequence` and `usage`; in Chat Completions the completion with one choice, its `message` (`content`, `reasoning_content`, `tool_calls`), `finish_reason` and `usage`. Nothing in `response` is renamed. Then `blocks[]`, the response's content as it streamed, piece by piece, with times. Then the gateway's own fields: `id`, `agent`, `session`, `provider`, `model`, `format`, `interrupted` (`null`, or `by` the level that cut it, `at` when, and the `block` it landed in, by its `at`), `error`. A cut stream's response ends with the reason `interrupted`.
 
-**Block.** `index`, `type`, `started` when it opened, `ended` when it closed, and its content under the format's own field names:
+**Piece.** A piece is one object the provider sent as part of the response, grown by the deltas that followed it. The gateway adds three fields and nothing else: `at`, where the piece lives in the response; `started`, when it opened; `ended`, when it closed. Everything inside a piece is the provider's own: its `type` if it sent one, its fields under its own names, including names that did not exist when the gateway was written.
 
-| Format | Block types | Content fields |
-|---|---|---|
-| Messages | `thinking`, `text`, `tool_use` | `thinking` + `signature`; `text`; `id`, `name`, `input` (whole at close) |
-| Chat Completions | `reasoning`, `content`, `tool_call` | `reasoning`; `content`; `id`, `name`, `arguments`, `call_index` |
+The gateway reads a stream with one rule and no vocabulary. It knows the envelope of each format, which part of a line is the head, which opens a piece, which grows one, and folds each delta into its piece by shape alone: strings grow, objects merge, lists of objects that carry an `index` merge entry by entry, anything else is set, `type` is set once, null never erases. No code in the tap names `text`, `thinking`, `tool_use`, `content`, `reasoning_content` or `tool_calls`. A block type or field that a provider adds next year is recorded whole the day it appears.
 
-In Messages, blocks are explicit on the wire. In Chat Completions they are inferred: a block begins with the first delta of its kind and ends when a different kind begins or `finish_reason` arrives.
+| Format | Where pieces live | What opens one | One convention |
+|---|---|---|---|
+| Messages | `response.content[i]`, at `content[i]` | the wire's own block start and stop | a piece's JSON text, sent as `partial_json`, is its `input`: parsed as far as it has got while open, whole when closed |
+| Chat Completions | `response.blocks[]`, each at `choices[i].message.<key>` or `<key>[j]` | a delta to a different place than the open piece; a list of indexed objects is one piece per index | none |
 
-The request is kept verbatim. The response is kept whole, in the provider's shape, and the blocks are the same content with the time each piece opened and closed. Reading a running stream returns the response as far as it has got.
+In Chat Completions the native message has no pieces, so the pieces sit beside it inside `response` as `blocks`, the same deltas with their times. The message is those deltas merged.
+
+Proof: the five real wire captures in `tests/fixtures`, from Anthropic, OpenAI, Anthropic's compatible endpoint and Ollama, assemble through this merge into exactly the object each provider's own SDK assembles, and a synthetic stream with a block type, a delta type and fields no SDK knows is recorded whole.
 
 ## Real time
 
@@ -100,9 +102,9 @@ Every event names its `type`, `at`, `agent`, `session` and, for stream events, `
 |---|---|
 | `stream.started` | `snapshot`: the stream without blocks, request included |
 | `stream.response` | `response`: what the provider said about the response before its blocks: id, model, role |
-| `block.started` | `block`: the block, with `started` and no `ended` |
-| `block.delta` | `index`, `field`, `delta` |
-| `block.ended` | `block`: the block, whole, with `ended` |
+| `block.started` | `at`, `block`: the piece as it opened, with `started` and no `ended` |
+| `block.delta` | `at`, `delta`: the delta object exactly as the provider sent it |
+| `block.ended` | `at`, `block`: the piece, whole, with `ended` |
 | `stream.ended` | `snapshot`: the stream without blocks or request: the whole `response`, the interruption, the end time |
 | `killswitch` | `level`, `on`, `agent`, `session`, and the whole `state` |
 
@@ -132,7 +134,7 @@ A state at three levels. On means two things at once, for everything in scope: r
 
 Only the operator's key sets a switch. `GET /v1/killswitch` returns the state: `gateway`, `agents[]`, `sessions[]`.
 
-A cut lands within a tenth of a second of the switch, whatever the provider is doing, including while it is silent. The gateway closes its connection to the provider, so the provider stops generating. It ends the caller's stream with a whole message in the format's own shape, so the caller's SDK returns normally: in Messages, `content_block_stop` for the open block, `message_delta` with `stop_reason: "interrupted"`, `message_stop`; in Chat Completions, a final chunk marked `"interrupted": true` with a finish reason, then `[DONE]`. The record marks the stream `interrupted`, by which level, at what time, in which block, and the block it landed in gets its end time.
+A cut lands within a tenth of a second of the switch, whatever the provider is doing, including while it is silent. The gateway closes its connection to the provider, so the provider stops generating. It ends the caller's stream with a whole message in the format's own shape, so the caller's SDK returns normally: in Messages, `content_block_stop` for the open block, `message_delta` with `stop_reason: "interrupted"`, `message_stop`; in Chat Completions, a final chunk marked `"interrupted": true` with a finish reason, then `[DONE]`. The record marks the stream `interrupted`, by which level, at what time, and at which piece, and that piece gets its end time.
 
 Every switch change is published on the feeds as a `killswitch` event.
 

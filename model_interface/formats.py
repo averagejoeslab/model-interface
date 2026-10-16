@@ -1,10 +1,14 @@
-"""The two wire formats, each passed through by its own SDK.
+"""The two wire formats, each passed through by its own SDK, each read by one merge that never looks at a name.
 
-A Format knows how to open a streaming call with the native SDK and how to read the stream's lines
-into the record's blocks as they arrive. It never changes what goes over the wire.
+A Format knows how to open a streaming call with the native SDK, and the envelope of its stream: which
+part of a line is the response's head, which part opens a piece, which part grows one. What is inside a
+piece is never named: a piece is whatever object the provider sent, grown by whatever deltas followed,
+by shape alone. Strings grow, dicts merge, lists of indexed objects merge by index, anything else is set.
 """
+import copy
 import inspect
 import json
+import re
 import time
 import uuid
 from abc import ABC, abstractmethod
@@ -14,15 +18,50 @@ import openai
 from jiter import from_json
 
 
-def parse_input(partial_json: str):
-    """A tool's input from its JSON text: whole when the block closed itself, as far as it got when it was cut."""
+# ── the merge: one rule for every key, known or not ──────────────────────────
+
+def merge(acc: dict, delta: dict, grow: bool = True) -> dict:
+    """Fold `delta` into `acc` by the shape of each value, never by the name of its key.
+
+    grow=True is for the pieces of a stream: strings are appended, lists extend, nothing is replaced by null, and
+    a piece's `type` is its identity and is set once. grow=False is for a head that is restated: values are set.
+    A list of objects that carry an `index` merges entry by entry, in both modes. Values are copied in, never
+    shared, so a delta can be folded into two places without the two growing each other.
+    """
+    for k, v in delta.items():
+        a = acc.get(k)
+        if grow and a is not None and (v is None or k == "type"):
+            continue
+        if grow and isinstance(a, str) and isinstance(v, str):
+            acc[k] = a + v
+        elif isinstance(a, dict) and isinstance(v, dict):
+            merge(a, v, grow)
+        elif isinstance(a, list) and isinstance(v, list) and indexed(v):
+            for item in v:
+                while len(a) <= item["index"]:
+                    a.append({})
+                merge(a[item["index"]], item, grow)
+        elif grow and isinstance(a, list) and isinstance(v, list):
+            a.extend(copy.deepcopy(v))
+        else:
+            acc[k] = copy.deepcopy(v)
+    return acc
+
+
+def indexed(items: list) -> bool:
+    """Whether a list is of objects that each say where they go."""
+    return bool(items) and all(isinstance(x, dict) and "index" in x for x in items)
+
+
+def parse_json(text: str):
+    """JSON text as a value: whole when it is whole, as far as it got when it is not, or None when it is nothing yet."""
     try:
-        return json.loads(partial_json)
+        return json.loads(text)
     except ValueError:
         try:
-            return from_json(partial_json.encode(), partial_mode="trailing-strings")
+            return from_json(text.encode(), partial_mode="trailing-strings")
         except ValueError:
-            return {"partial_json": partial_json}
+            return None
 
 
 def data_of(line: str):
@@ -34,17 +73,20 @@ def data_of(line: str):
     return None
 
 
-class Reading:
-    """Reads a stream's lines into a Stream record, block by block, telling a listener as it goes.
+# ── the reading: the record of one stream, built as its lines pass ───────────
 
-    The record is the live object: a block appears when it opens, grows with each delta, and gets
-    its end time when it closes.
+class Reading:
+    """Reads a stream's lines into a Stream record, piece by piece, telling a listener as it goes.
+
+    The record is the live object: a piece appears when it opens, grows with each delta, and gets its end time
+    when it closes. Every piece carries `at`, where it lives in the response, and `started`/`ended`. Nothing
+    else is added, and nothing the provider sent is renamed or dropped.
     """
 
     def __init__(self, stream, listener=lambda kind, **payload: None):
         self.stream = stream
         self.listener = listener
-        self.open = None                 # the block that hasn't closed yet, or None
+        self.open = None                 # the piece that hasn't closed yet, or None
 
     def feed(self, line: str):
         data = data_of(line)
@@ -53,41 +95,47 @@ class Reading:
 
     def take(self, data: dict): ...
 
-    def start(self, **head):
-        """What the provider says about the response before and around its blocks: id, model, role, and later its end and usage."""
-        self.stream.response.update(head)
-        self.listener("stream.response", response=head)
+    def head(self, fields: dict):
+        """What the provider says about the response outside its pieces; restated fields are set, not grown.
 
-    def open_block(self, type: str, **fields):
-        self.close_block()
-        block = {"index": len(self.stream.blocks), "type": type, "started": time.time(), "ended": None, **fields}
+        Only what changed is told: a format that repeats its head on every line is not news on every line.
+        """
+        changed = {k: v for k, v in fields.items() if k not in self.stream.response or self.stream.response[k] != v}
+        if changed:
+            merge(self.stream.response, changed, grow=False)
+            self.listener("stream.response", response=changed)
+
+    def open_piece(self, at: str, piece: dict):
+        self.close_piece()
+        block = {"at": at, "started": time.time(), "ended": None, **piece}
         self.stream.blocks.append(block)
         self.open = block
-        self.listener("block.started", block=block)
+        self.listener("block.started", at=at, block=block)
         return block
 
-    def grow(self, field: str, piece: str):
-        if self.open is not None and piece:
-            self.open[field] = self.open.get(field, "") + piece
-            self.listener("block.delta", index=self.open["index"], field=field, delta=piece)
+    def grow(self, at: str, delta: dict):
+        """A delta for the piece at `at`: opens it if it is not the open one, then grows it by shape."""
+        if self.open is None or self.open["at"] != at:
+            self.open_piece(at, {})
+        merge(self.open, delta)
+        self.settle(self.open)
+        self.listener("block.delta", at=at, delta=delta)
 
-    def close_block(self):
+    def settle(self, piece: dict):
+        """Anything the format derives from a piece's own fields, kept current as it grows."""
+
+    def close_piece(self):
         if self.open is None:
             return
         self.open["ended"] = time.time()
-        self.finish_block(self.open)
-        self.listener("block.ended", block=self.open)
+        self.settle(self.open)
+        self.listener("block.ended", at=self.open["at"], block=self.open)
         self.open = None
 
-    def finish_block(self, block: dict):
-        """Anything to settle once a block is whole, such as parsing its input."""
-
-    def stop(self, reason, usage=None):
-        """The stream's end as the provider stated it: the reason, under the format's own word, and usage as the provider names it."""
-        self.close_block()
+    def stop(self, reason):
+        """The stream's end: the format's own word, set on the head."""
+        self.close_piece()
         self.stream.response[self.stream.model.format.stop_field] = reason
-        if usage:
-            self.stream.response.setdefault("usage", {}).update(usage)
 
 
 class Format(ABC):
@@ -104,12 +152,12 @@ class Format(ABC):
         """A streaming call, as the SDK's streaming-response context manager."""
 
     @abstractmethod
-    def reading(self, stream, listener) -> Reading: ...
+    def reading(self, stream, listener=lambda kind, **payload: None) -> Reading: ...
 
     @staticmethod
-    def content_of(block: dict) -> dict:
-        """A block as the provider would write it: its content fields, without the record's index and times."""
-        return {k: v for k, v in block.items() if k not in ("index", "started", "ended")}
+    def native(block: dict) -> dict:
+        """A piece as the provider would write it: without the record's `at` and times."""
+        return {k: v for k, v in block.items() if k not in ("at", "started", "ended")}
 
     @abstractmethod
     def response(self, stream) -> dict:
@@ -143,44 +191,36 @@ class Format(ABC):
 
 
 # ── Anthropic Messages ───────────────────────────────────────────────────────
+#
+# The envelope: a line with `message` is the head. A line with `content_block` and `index` opens the piece at
+# content[index]. A line with `delta` and `index` grows that piece. A line with `delta` and no index, or with
+# `usage`, restates the head. Pieces are the message's content.
 
 class AnthropicReading(Reading):
-    """Blocks are explicit on the wire: content_block_start, deltas, content_block_stop."""
-
-    def __init__(self, stream, listener):
-        super().__init__(stream, listener)
-        self.partial = ""                # a tool_use input, as JSON text, until the block closes
-
     def take(self, e):
-        t = e.get("type")
-        if t == "message_start":
-            self.start(**{k: v for k, v in e["message"].items() if k != "content"})     # content is the blocks
-        elif t == "content_block_start":
-            b = dict(e["content_block"])
-            self.partial = ""
-            self.open_block(b.pop("type"), **b)
-        elif t == "content_block_delta":
-            d = e["delta"]
-            if d["type"] == "text_delta":
-                self.grow("text", d["text"])
-            elif d["type"] == "thinking_delta":
-                self.grow("thinking", d["thinking"])
-            elif d["type"] == "signature_delta":
-                self.grow("signature", d["signature"])
-            elif d["type"] == "input_json_delta":
-                self.partial += d["partial_json"]
-                self.listener("block.delta", index=self.open["index"], field="input", delta=d["partial_json"])
-        elif t == "content_block_stop":
-            self.close_block()
-        elif t == "message_delta":
-            self.stream.response.update({k: v for k, v in e["delta"].items() if k != "stop_reason"})
-            self.stop(e["delta"].get("stop_reason"), e.get("usage"))
-        elif t == "error":
+        if "message" in e:
+            self.head({k: v for k, v in e["message"].items() if k != "content"})   # the content is the pieces
+        elif "content_block" in e and "index" in e:
+            self.open_piece(f"content[{e['index']}]", dict(e["content_block"]))
+        elif "delta" in e and "index" in e:
+            self.grow(f"content[{e['index']}]", {k: v for k, v in e["delta"].items() if k != "type"})   # the delta's type names the delta, not the piece
+        elif "delta" in e or "usage" in e:
+            self.head({**e.get("delta", {}), **({"usage": e["usage"]} if e.get("usage") else {})})
+            if e.get("delta", {}).get(self.stream.model.format.stop_field):
+                self.stop(e["delta"][self.stream.model.format.stop_field])
+        elif e.get("type") == "content_block_stop":
+            self.close_piece()
+        elif e.get("type") == "error":
             self.stream.error = json.dumps(e.get("error"))
 
-    def finish_block(self, block):
-        if block["type"] == "tool_use" and self.partial.strip():
-            block["input"] = parse_input(self.partial)
+    def settle(self, piece):
+        """The one convention of this format: a piece's JSON text, sent as `partial_json`, is its `input`."""
+        if "partial_json" in piece:
+            value = parse_json(piece["partial_json"])
+            if value is not None:
+                piece["input"] = value
+            if piece["ended"]:
+                del piece["partial_json"]
 
 
 class AnthropicFormat(Format):
@@ -194,13 +234,11 @@ class AnthropicFormat(Format):
         beta = {"anthropic-beta": headers["anthropic-beta"]} if headers.get("anthropic-beta") else None
         return client.messages.with_streaming_response.create(**kwargs, stream=True, extra_body=extra, extra_headers=beta)
 
-    def reading(self, stream, listener):
+    def reading(self, stream, listener=lambda kind, **payload: None):
         return AnthropicReading(stream, listener)
 
     def response(self, stream):
-        head = {"id": None, "type": "message", "role": "assistant", "model": None, **stream.response}
-        return {**head, "content": [self.content_of(b) for b in stream.blocks],
-                "stop_reason": head.get("stop_reason"), "stop_sequence": head.get("stop_sequence"), "usage": head.get("usage", {})}
+        return {**stream.response, "content": [self.native(b) for b in stream.blocks]}
 
     def closing(self, reading):
         def sse(e):
@@ -211,7 +249,7 @@ class AnthropicFormat(Format):
                                                                  "model": "", "content": [], "stop_reason": None, "stop_sequence": None,
                                                                  "usage": {"input_tokens": 0, "output_tokens": 0}}}))
         if reading.open is not None:
-            out.append(sse({"type": "content_block_stop", "index": reading.open["index"]}))
+            out.append(sse({"type": "content_block_stop", "index": int(re.search(r"\[(\d+)\]", reading.open["at"]).group(1))}))
         out.append(sse({"type": "message_delta", "delta": {"stop_reason": "interrupted", "stop_sequence": None},
                         "usage": {"output_tokens": reading.stream.response.get("usage", {}).get("output_tokens", 0)}}))
         out.append(sse({"type": "message_stop"}))
@@ -222,39 +260,38 @@ class AnthropicFormat(Format):
 
 
 # ── OpenAI Chat Completions ──────────────────────────────────────────────────
+#
+# The envelope: every chunk's top-level fields restate the head. Each choices[i].delta grows choices[i].message,
+# and every key in it grows a piece at that key, one per index for a list of indexed objects. The other fields of
+# a choice are set. Pieces are the deltas as they came; the message is the same deltas merged.
 
 class OpenAIReading(Reading):
-    """Blocks are inferred: a run of content, of reasoning, or of one tool call's arguments."""
-
-    def __init__(self, stream, listener):
-        super().__init__(stream, listener)
-        self.calls = {}                  # the provider's tool call index -> our block
-
     def take(self, c):
-        if not self.stream.response and (c.get("id") or c.get("model")):
-            self.start(**{k: v for k, v in c.items() if k not in ("choices", "usage", "object")}, object="chat.completion")
-        if c.get("usage"):
-            self.stream.response.setdefault("usage", {}).update(c["usage"])
+        self.head({k: v for k, v in c.items() if k != "choices"})
         for choice in c.get("choices") or []:
+            i = choice.get("index", 0)
+            choices = self.stream.response.setdefault("choices", [])
+            while len(choices) <= i:
+                choices.append({"index": len(choices), "message": {}})
+            merge(choices[i], {k: v for k, v in choice.items() if k != "delta"}, grow=False)
             delta = choice.get("delta") or {}
-            if delta.get("reasoning_content"):
-                if not (self.open and self.open["type"] == "reasoning"):
-                    self.open_block("reasoning", reasoning="")
-                self.grow("reasoning", delta["reasoning_content"])
-            if delta.get("content"):
-                if not (self.open and self.open["type"] == "content"):
-                    self.open_block("content", content="")
-                self.grow("content", delta["content"])
-            for call in delta.get("tool_calls") or []:
-                i = call.get("index", 0)
-                if i not in self.calls:
-                    self.calls[i] = self.open_block("tool_call", call_index=i, id=call.get("id"), name=call.get("function", {}).get("name"), arguments="")
-                block = self.calls[i]
-                block["id"] = block["id"] or call.get("id")
-                block["name"] = block["name"] or call.get("function", {}).get("name")
-                self.grow("arguments", call.get("function", {}).get("arguments") or "")
+            merge(choices[i]["message"], delta)
+            for key, value in delta.items():
+                if value in (None, "", [], {}):
+                    continue
+                if isinstance(value, list) and indexed(value):
+                    for item in value:
+                        self.grow(f"choices[{i}].message.{key}[{item['index']}]", item)
+                else:
+                    self.grow(f"choices[{i}].message.{key}", {key: value})
             if choice.get("finish_reason"):
                 self.stop(choice["finish_reason"])
+
+    def stop(self, reason):
+        """This format's end lives on the choice, not on the head."""
+        self.close_piece()
+        choices = self.stream.response.setdefault("choices", [{"index": 0, "message": {}}])
+        choices[0]["finish_reason"] = reason
 
 
 class OpenAIFormat(Format):
@@ -267,24 +304,13 @@ class OpenAIFormat(Format):
         kwargs, extra = self._split(client.chat.completions.create, body)
         return client.chat.completions.with_streaming_response.create(**kwargs, stream=True, extra_body=extra)
 
-    def reading(self, stream, listener):
+    def reading(self, stream, listener=lambda kind, **payload: None):
         return OpenAIReading(stream, listener)
 
     def response(self, stream):
-        """One choice, its message assembled from the blocks: content and reasoning joined, one tool call per tool_call block."""
-        head = {k: v for k, v in stream.response.items() if k not in ("finish_reason", "usage")}
-        text = "".join(b.get("content", "") for b in stream.blocks if b["type"] == "content")
-        reasoning = "".join(b.get("reasoning", "") for b in stream.blocks if b["type"] == "reasoning")
-        calls = [{"id": b.get("id"), "type": "function", "function": {"name": b.get("name"), "arguments": b.get("arguments", "")}}
-                 for b in stream.blocks if b["type"] == "tool_call"]
-        message = {"role": "assistant", "content": text or None}
-        if reasoning:
-            message["reasoning_content"] = reasoning
-        if calls:
-            message["tool_calls"] = calls
-        return {"id": None, "object": "chat.completion", "created": None, "model": None, **head,
-                "choices": [{"index": 0, "message": message, "finish_reason": stream.response.get("finish_reason")}],
-                "usage": stream.response.get("usage", {})}
+        r = {k: v for k, v in stream.response.items() if k not in ("obfuscation", self.stop_field)}
+        r["object"] = "chat.completion"
+        return {**r, "blocks": [dict(b) for b in stream.blocks]}
 
     def closing(self, reading):
         chunk = {"id": reading.stream.response.get("id") or f"chatcmpl-{uuid.uuid4().hex[:12]}", "object": "chat.completion.chunk",

@@ -71,12 +71,13 @@
   .block:last-child { border-bottom: 0; }
   .block .kind { font-size: 12px; font-weight: 600; }
   .block .kind small { display: block; color: var(--muted); font-weight: 400; font-variant-numeric: tabular-nums; }
-  .block.thinking .kind, .block.reasoning .kind { color: var(--thinking); }
+  .block.thinking .kind, .block.reasoning .kind, .block.reasoning_content .kind { color: var(--thinking); }
   .block.text .kind, .block.content .kind { color: var(--text-block); }
-  .block.tool_use .kind, .block.tool_call .kind { color: var(--tool); }
+  .block.tool_use .kind, .block.tool_call .kind, .block.tool_calls .kind { color: var(--tool); }
+  .block .body .k { color: var(--muted); font-family: var(--mono); font-size: 12px; margin-right: 6px; }
   .block .body { white-space: pre-wrap; word-break: break-word; font-size: 13px; }
-  .block.thinking .body, .block.reasoning .body { color: var(--muted); font-style: italic; }
-  .block.tool_use .body, .block.tool_call .body { font-family: var(--mono); font-size: 12.5px; }
+  .block.thinking .body, .block.reasoning .body, .block.reasoning_content .body { color: var(--muted); font-style: italic; }
+  .block.tool_use .body, .block.tool_call .body, .block.tool_calls .body { font-family: var(--mono); font-size: 12.5px; }
   .block.open .body::after { content: "▍"; color: var(--live); animation: pulse .8s infinite; }
   .block.cut .body::after { content: " ✂ cut here"; color: var(--bad); font-style: normal; font-size: 12px; }
   .foot { display: flex; gap: 14px; padding: 8px 14px; border-top: 1px solid var(--line); color: var(--muted); font-size: 12px; font-variant-numeric: tabular-nums; flex-wrap: wrap; }
@@ -94,9 +95,9 @@
   .tree .cutmark { color: var(--bad); font-weight: 600; }
   .tree .running { color: var(--live); }
   .tree .preview { color: var(--muted); }
-  .tree .thinking, .tree .reasoning { color: var(--thinking); }
+  .tree .thinking, .tree .reasoning, .tree .reasoning_content { color: var(--thinking); }
   .tree .text, .tree .content { color: var(--text-block); }
-  .tree .tool_use, .tree .tool_call { color: var(--tool); }
+  .tree .tool_use, .tree .tool_call, .tree .tool_calls { color: var(--tool); }
   pre.json { margin: 0; background: var(--panel); border: 1px solid var(--line); border-radius: 12px; padding: 14px 16px; font: 12px/1.55 var(--mono); overflow: auto; white-space: pre-wrap; word-break: break-word; }
   .json .k { color: var(--accent); }
   .json .s { color: var(--text); }
@@ -221,34 +222,49 @@
     return (m.content || []).map((c) => c.type === "text" ? c.text : c.type === "tool_result" ? `[tool_result ${c.tool_use_id || ""}]` : c.text || `[${c.type}]`).join(" ");
   }
   function bodyOf(b) {
-    if (b.type === "tool_use") return `${b.name || ""}(${typeof b.input === "string" ? b.input : b.input ? JSON.stringify(b.input, null, 1) : ""})`;
-    if (b.type === "tool_call") return `${b.name || ""}(${b.arguments || ""})`;
-    return b.thinking ?? b.reasoning ?? b.text ?? b.content ?? "";
+    const fields = Object.entries(strip(b)).filter(([k]) => k !== "type");
+    if (fields.length === 1 && typeof fields[0][1] === "string") return fields[0][1];
+    return fields.map(([k, v]) => `${k}: ${typeof v === "string" ? v : JSON.stringify(v)}`).join("\n");
   }
   function drawBlock(b, st) {
-    const cut = st.interrupted && st.interrupted.block && st.interrupted.block.index === b.index;
-    return `<div class="block ${esc(b.type)}${b.ended ? "" : " open"}${cut ? " cut" : ""}" data-index="${b.index}">
-      <div class="kind">${esc(b.type)}<small>${clock(b.started)}</small><small>${b.ended ? span(b.started, b.ended) : "…"}</small></div>
+    const cut = st.interrupted && st.interrupted.block && st.interrupted.block.at === b.at;
+    const kind = kindOf(b);
+    return `<div class="block ${esc(kind)}${b.ended ? "" : " open"}${cut ? " cut" : ""}" data-at="${esc(b.at)}">
+      <div class="kind" title="${esc(b.at)}">${esc(b.type || b.at.split(".").pop())}<small>${clock(b.started)}</small><small>${b.ended ? span(b.started, b.ended) : "…"}</small></div>
       <div class="body">${esc(bodyOf(b))}</div></div>`;
   }
-  // ── the response, whole, in the provider's shape, composed from the head and the blocks as the server does ──
-  const strip = (b) => Object.fromEntries(Object.entries(b).filter(([k]) => !["index", "started", "ended"].includes(k)));
-  function composeResponse(st) {
-    const head = st.response || {}, blocks = st.blocks || [];
-    if (st.format === "anthropic") {
-      const {content, ...rest} = head;
-      return {id: null, type: "message", role: "assistant", model: null, ...rest, content: blocks.map(strip),
-              stop_reason: head.stop_reason ?? null, stop_sequence: head.stop_sequence ?? null, usage: head.usage || {}};
+  // ── the merge: a delta folded into a piece by shape, never by name, as the gateway does it ──
+  const indexed = (v) => Array.isArray(v) && v.length > 0 && v.every((x) => x && typeof x === "object" && "index" in x);
+  function merge(acc, delta) {
+    for (const [k, v] of Object.entries(delta)) {
+      const a = acc[k];
+      if (a != null && (v == null || k === "type")) continue;
+      if (typeof a === "string" && typeof v === "string") acc[k] = a + v;
+      else if (a && typeof a === "object" && !Array.isArray(a) && v && typeof v === "object" && !Array.isArray(v)) merge(a, v);
+      else if (Array.isArray(a) && indexed(v)) { for (const item of v) { while (a.length <= item.index) a.push({}); merge(a[item.index], item); } }
+      else if (Array.isArray(a) && Array.isArray(v)) a.push(...structuredClone(v));
+      else acc[k] = structuredClone(v);
     }
-    const {choices, finish_reason, usage, ...rest} = head;
-    const text = blocks.filter((b) => b.type === "content").map((b) => b.content || "").join("");
-    const reasoning = blocks.filter((b) => b.type === "reasoning").map((b) => b.reasoning || "").join("");
-    const calls = blocks.filter((b) => b.type === "tool_call").map((b) => ({id: b.id ?? null, type: "function", function: {name: b.name ?? null, arguments: b.arguments || ""}}));
-    const message = {role: "assistant", content: text || null};
-    if (reasoning) message.reasoning_content = reasoning;
-    if (calls.length) message.tool_calls = calls;
-    return {id: null, object: "chat.completion", created: null, model: null, ...rest,
-            choices: [{index: 0, message, finish_reason: finish_reason ?? choices?.[0]?.finish_reason ?? null}], usage: usage || {}};
+    return acc;
+  }
+  const OURS = ["at", "started", "ended"];
+  const strip = (b) => Object.fromEntries(Object.entries(b).filter(([k]) => !OURS.includes(k) && k !== "partial_json"));
+  const kindOf = (b) => (b.type || b.at.split(".").pop()).replace(/\[.*$/, "");
+  function composeResponse(st) {
+    const head = structuredClone(st.response || {}), blocks = st.blocks || [];
+    if (st.format === "anthropic") {
+      return {...head, content: blocks.map(strip)};
+    }
+    const choices = head.choices || [{index: 0, message: {}}];
+    for (const b of blocks) {                          // each piece back at its place in the message
+      const m = (choices[0].message ||= {});
+      const path = b.at.replace(/^choices\[\d+\]\.message\./, "");
+      const list = path.match(/^(\w+)\[(\d+)\]$/);
+      if (list) { (m[list[1]] ||= [])[+list[2]] = strip(b); }
+      else m[path] = b[path];
+    }
+    delete head.obfuscation;
+    return {...head, object: "chat.completion", choices};
   }
   const endOf = (st) => { const r = composeResponse(st); return r.stop_reason ? `stop_reason ${r.stop_reason}` : r.choices?.[0]?.finish_reason ? `finish_reason ${r.choices[0].finish_reason}` : ""; };
   function drawFoot(st) {
@@ -294,8 +310,8 @@
       const blocks = st.blocks || [];
       blocks.forEach((b, j) => {
         const last = j === blocks.length - 1;
-        const landed = st.interrupted && st.interrupted.block && st.interrupted.block.index === b.index;
-        lines.push(`${g2}<span class="guide">   ${last ? "└─" : "├─"}</span> <span class="node ${esc(b.type)}">[${b.index}] ${esc(b.type)}</span>  ${when(b.started, b.ended)}${b.ended ? "" : '  <span class="running">open</span>'}${landed ? '  <span class="cutmark">✂ cut landed here</span>' : ""}`);
+        const landed = st.interrupted && st.interrupted.block && st.interrupted.block.at === b.at;
+        lines.push(`${g2}<span class="guide">   ${last ? "└─" : "├─"}</span> <span class="node ${esc(kindOf(b))}">${esc(b.at)}${b.type ? " · " + esc(b.type) : ""}</span>  ${when(b.started, b.ended)}${b.ended ? "" : '  <span class="running">open</span>'}${landed ? '  <span class="cutmark">✂ cut landed here</span>' : ""}`);
         const pv = preview(b);
         if (pv) lines.push(`${g2}<span class="guide">   ${last ? "  " : "│ "}</span>     ${pv}`);
       });
@@ -352,13 +368,14 @@
       if (inView(e)) { if (mode !== "cards") redrawTree(); else { const box = el(st, ".blocks"); if (box) box.insertAdjacentHTML("beforeend", drawBlock(e.block, st)); view.scrollTop = view.scrollHeight; } }
     },
     "block.delta"(e, st) {
-      const b = st.blocks[e.index]; if (!b) return;
-      b[e.field] = (b[e.field] || "") + e.delta;
-      if (inView(e) && e.field !== "signature") { if (mode !== "cards") redrawTree(); else { const body = el(st, `.block[data-index="${e.index}"] .body`); if (body) body.textContent = bodyOf(b); } }
+      const b = st.blocks.find((x) => x.at === e.at); if (!b) return;
+      merge(b, e.delta);
+      if (inView(e)) { if (mode !== "cards") redrawTree(); else { const body = el(st, `.block[data-at="${CSS.escape(e.at)}"] .body`); if (body) body.textContent = bodyOf(b); } }
     },
     "block.ended"(e, st) {
-      st.blocks[e.block.index] = e.block;
-      if (inView(e)) { if (mode !== "cards") redrawTree(); else { const node = el(st, `.block[data-index="${e.block.index}"]`); if (node) node.outerHTML = drawBlock(e.block, st); } }
+      const i = st.blocks.findIndex((x) => x.at === e.at);
+      if (i >= 0) st.blocks[i] = e.block; else st.blocks.push(e.block);
+      if (inView(e)) { if (mode !== "cards") redrawTree(); else { const node = el(st, `.block[data-at="${CSS.escape(e.at)}"]`); if (node) node.outerHTML = drawBlock(e.block, st); } }
     },
     "stream.ended"(e, st) {
       Object.assign(st, e.snapshot, {blocks: st.blocks, request: st.request});
