@@ -69,7 +69,7 @@ Every level has an id, a start and an end.
 
 **Session.** `agent`, `session`, `started` at its first stream, `ended` when its last stream ended, `streams`, `interrupted`, `killswitch`.
 
-**Stream.** One connection to the provider: `started` when it opened, `ended` when it closed. `request` exactly as received. The response as it streamed: `message` (its id, model and role, from the first line), `blocks[]`, the reason it ended under the format's own word (`stop_reason` in Messages, `finish_reason` in Chat Completions), and `usage` with the provider's own names. Then the gateway's own fields: `id`, `agent`, `session`, `provider`, `model`, `format`, `interrupted` (`null`, or `by` the level that cut it, `at` when, and the `block` it landed in), `error`. A cut stream's reason is `interrupted`.
+**Stream.** One connection to the provider: `started` when it opened, `ended` when it closed. Two bodies, both in the provider's format: `request` exactly as received, and `response` as a non-streaming call would have returned it, assembled from the stream: in Messages the message with its `content`, `stop_reason`, `stop_sequence` and `usage`; in Chat Completions the completion with one choice, its `message` (`content`, `reasoning_content`, `tool_calls`), `finish_reason` and `usage`. Nothing in `response` is renamed. Then `blocks[]`, the response's content as it streamed, piece by piece, with times. Then the gateway's own fields: `id`, `agent`, `session`, `provider`, `model`, `format`, `interrupted` (`null`, or `by` the level that cut it, `at` when, and the `block` it landed in), `error`. A cut stream's response ends with the reason `interrupted`.
 
 **Block.** `index`, `type`, `started` when it opened, `ended` when it closed, and its content under the format's own field names:
 
@@ -80,7 +80,7 @@ Every level has an id, a start and an end.
 
 In Messages, blocks are explicit on the wire. In Chat Completions they are inferred: a block begins with the first delta of its kind and ends when a different kind begins or `finish_reason` arrives.
 
-The request is kept verbatim on the stream. The response is not kept again as a body; the blocks are the response.
+The request is kept verbatim. The response is kept whole, in the provider's shape, and the blocks are the same content with the time each piece opened and closed. Reading a running stream returns the response as far as it has got.
 
 ## Real time
 
@@ -99,11 +99,11 @@ Every event names its `type`, `at`, `agent`, `session` and, for stream events, `
 | Event | Carries |
 |---|---|
 | `stream.started` | `snapshot`: the stream without blocks, request included |
-| `stream.message` | `message`: the response's id, model and role |
+| `stream.response` | `response`: what the provider said about the response before its blocks: id, model, role |
 | `block.started` | `block`: the block, with `started` and no `ended` |
 | `block.delta` | `index`, `field`, `delta` |
 | `block.ended` | `block`: the block, whole, with `ended` |
-| `stream.ended` | `snapshot`: the stream without blocks or request: stop reason, usage, interruption, end time |
+| `stream.ended` | `snapshot`: the stream without blocks or request: the whole `response`, the interruption, the end time |
 | `killswitch` | `level`, `on`, `agent`, `session`, and the whole `state` |
 
 The first event on any feed is `watching`, with the scope and the killswitch state. A keepalive comment is sent every fifteen seconds of silence.

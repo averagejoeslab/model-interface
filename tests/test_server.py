@@ -125,13 +125,17 @@ def test_a_session_holds_streams_of_blocks_with_times_at_every_level(server, pro
     first = s["streams"][0]
     assert first["started"] <= first["ended"] <= s["ended"] and first["request"]["messages"] == [{"role": "user", "content": "first"}]
     assert first["provider"] == "fake-anthropic" and first["model"] == "fake-sonnet" and first["format"] == "anthropic"
-    assert first["message"] == {"id": "msg_1", "model": "fake-sonnet", "role": "assistant"}
+    r = first["response"]
+    assert r["id"] == "msg_1" and r["type"] == "message" and r["model"] == "fake-sonnet" and r["role"] == "assistant"
+    assert r["stop_reason"] == "tool_use" and r["stop_sequence"] is None and r["usage"] == {"input_tokens": 10, "output_tokens": 7}
+    assert r["content"] == [{"type": "thinking", "thinking": "Where am I?", "signature": "sig_abc"}, {"type": "text", "text": "Hello there, friend."},
+                            {"type": "tool_use", "id": "t1", "name": "shell", "input": {"cmd": "pwd"}}], "the response is whole, in the provider's shape"
     assert [b["type"] for b in first["blocks"]] == ["thinking", "text", "tool_use"]
     th, tx, tu = first["blocks"]
     assert th["thinking"] == "Where am I?" and th["signature"] == "sig_abc" and th["started"] <= th["ended"] <= tx["started"]
     assert tx["text"] == "Hello there, friend." and tx["ended"] <= tu["started"] <= tu["ended"] <= first["ended"]
     assert tu == {"index": 2, "type": "tool_use", "started": tu["started"], "ended": tu["ended"], "id": "t1", "name": "shell", "input": {"cmd": "pwd"}}
-    assert first["stop_reason"] == "tool_use" and first["usage"] == {"input_tokens": 10, "output_tokens": 7} and first["interrupted"] is None
+    assert first["interrupted"] is None and first["error"] is None
     assert httpx.get(f"{server}/v1/streams/{first['id']}", headers=ADMIN).json()["blocks"] == first["blocks"]
     assert "blocks" not in httpx.get(f"{server}/v1/agents/coder/sessions/s-rec", headers=ADMIN, params={"blocks": "false"}).json()["streams"][0]
     agents = httpx.get(f"{server}/v1/agents", headers=ADMIN).json()["data"]
@@ -148,8 +152,12 @@ def test_an_openai_stream_is_recorded_in_the_same_shape_with_its_own_block_types
     assert [b["type"] for b in st["blocks"]] == ["reasoning", "content", "tool_call"]
     assert st["blocks"][0]["reasoning"] == "Where am I?" and st["blocks"][1]["content"] == "Hello there, friend."
     assert st["blocks"][2]["name"] == "shell" and json.loads(st["blocks"][2]["arguments"]) == {"cmd": "pwd"} and st["blocks"][2]["call_index"] == 0
-    assert all(b["started"] <= b["ended"] for b in st["blocks"]) and st["finish_reason"] == "tool_calls" and "stop_reason" not in st
-    assert st["usage"] == {"prompt_tokens": 10, "completion_tokens": 7, "total_tokens": 17}
+    assert all(b["started"] <= b["ended"] for b in st["blocks"])
+    r = st["response"]
+    assert r["id"] == "chatcmpl-1" and r["object"] == "chat.completion" and r["created"] == 1 and r["model"] == "fake-gpt"
+    assert r["usage"] == {"prompt_tokens": 10, "completion_tokens": 7, "total_tokens": 17} and r["choices"][0]["finish_reason"] == "tool_calls"
+    assert r["choices"][0]["message"] == {"role": "assistant", "content": "Hello there, friend.", "reasoning_content": "Where am I?",
+                                          "tool_calls": [{"id": "call_1", "type": "function", "function": {"name": "shell", "arguments": '{"cmd": "pwd"}'}}]}
 
 
 def test_an_agent_sees_only_its_own_record_and_the_operator_sees_all(server, provider):
@@ -181,7 +189,8 @@ def test_the_live_feed_shows_each_block_opening_growing_and_closing_before_the_s
     t_end = time.time()
     watcher.join(5)
     kinds = [e["type"] for _, e in seen]
-    assert kinds[0] == "stream.started" and kinds[1] == "stream.message" and kinds[-1] == "stream.ended"
+    assert kinds[0] == "stream.started" and kinds[1] == "stream.response" and kinds[-1] == "stream.ended"
+    assert "response" not in seen[0][1]["snapshot"] and seen[1][1]["response"]["id"] == "msg_1"
     assert kinds.count("block.started") == 3 and kinds.count("block.ended") == 3 and kinds.count("block.delta") >= 5
     assert all(e["agent"] == "coder" and e["session"] == "s-live" and e["stream"] == seen[0][1]["stream"] for _, e in seen)
     opened = [(t, e) for t, e in seen if e["type"] == "block.started"]
@@ -190,7 +199,8 @@ def test_the_live_feed_shows_each_block_opening_growing_and_closing_before_the_s
     assert all(e["block"]["ended"] is None for _, e in opened) and all(e["block"]["ended"] for _, e in seen if e["type"] == "block.ended")
     assert {d["field"] for _, d in seen if d["type"] == "block.delta"} == {"thinking", "signature", "text", "input"}
     ended = [e for _, e in seen if e["type"] == "stream.ended"][0]
-    assert ended["snapshot"]["stop_reason"] == "tool_use" and "request" not in ended["snapshot"]
+    assert ended["snapshot"]["response"]["stop_reason"] == "tool_use" and len(ended["snapshot"]["response"]["content"]) == 3
+    assert "request" not in ended["snapshot"] and "blocks" not in ended["snapshot"]
 
 
 def test_the_global_feed_carries_every_agent_and_an_agents_feed_only_its_own(server, provider):
@@ -217,7 +227,7 @@ def test_the_session_killswitch_cuts_that_session_only_and_records_the_block_it_
     assert [e["type"] for e in events[-3:]] == ["content_block_stop", "message_delta", "message_stop"]
     assert events[-2]["delta"]["stop_reason"] == "interrupted" and len(events) < 14 and hung_up(provider)
     rec = httpx.get(f"{server}/v1/streams/{stream}", headers=ADMIN).json()
-    assert rec["stop_reason"] == "interrupted" and rec["interrupted"]["by"] == "session" and rec["interrupted"]["at"]
+    assert rec["response"]["stop_reason"] == "interrupted" and rec["interrupted"]["by"] == "session" and rec["interrupted"]["at"]
     assert rec["interrupted"]["block"] == {"index": 0, "type": "text"} and rec["blocks"][0]["text"].startswith("one two") and rec["blocks"][0]["ended"]
     r = httpx.post(f"{server}/v1/messages", headers={**H, "X-Session": "s-kill"}, json=anthropic_body())
     assert r.status_code == 423 and r.json()["error"]["level"] == "session"
@@ -235,7 +245,7 @@ def test_the_agent_killswitch_cuts_every_session_of_that_agent_and_no_other_agen
     last = json.loads(seen[-2])
     assert seen[-1] == "[DONE]" and last["interrupted"] is True and hung_up(provider)
     rec = httpx.get(f"{server}/v1/streams/{stream}", headers=ADMIN).json()
-    assert rec["interrupted"]["by"] == "agent" and rec["finish_reason"] == "interrupted"
+    assert rec["interrupted"]["by"] == "agent" and rec["response"]["choices"][0]["finish_reason"] == "interrupted"
     assert httpx.post(f"{server}/v1/messages", headers={**H, "X-Session": "a-two"}, json=anthropic_body()).json()["error"]["level"] == "agent"
     assert httpx.post(f"{server}/v1/chat/completions", headers={"x-api-key": "helper-key"}, json=openai_body()).status_code == 200, "helper runs"
     switches = {a["agent"]: a["killswitch"] for a in httpx.get(f"{server}/v1/agents", headers=ADMIN).json()["data"]}

@@ -38,22 +38,22 @@ class Stream:
     id: str = field(default_factory=lambda: f"str_{uuid.uuid4().hex[:12]}")
     started: float = field(default_factory=time.time)
     ended: float | None = None
-    message: dict = field(default_factory=dict)    # the response's id, model and role, from its first line
-    blocks: list = field(default_factory=list)
-    stop: str | None = None                # why the response ended, in the format's own vocabulary
-    usage: dict = field(default_factory=dict)   # as the provider names it
+    response: dict = field(default_factory=dict)   # everything the provider said about the response outside its blocks
+    blocks: list = field(default_factory=list)     # the response's content, piece by piece, each with its times
     interrupted: dict | None = None        # {"by": level, "at": when, "block": {index, type} or None} once cut
     error: str | None = None
 
-    def snapshot(self, blocks: bool = True, request: bool = True) -> dict:
+    def snapshot(self, blocks: bool = True, request: bool = True, response: bool = True) -> dict:
+        """The stream: the request as received, the response as the provider would have returned it whole, and the blocks with their times."""
         out = {"id": self.id, "agent": self.agent, "session": self.session, "provider": self.model.provider.name,
-               "model": self.model.name, "format": self.model.format.name,
-               "started": iso(self.started), "ended": iso(self.ended), "message": self.message}
+               "model": self.model.name, "format": self.model.format.name, "started": iso(self.started), "ended": iso(self.ended)}
         if request:
             out["request"] = self.request
+        if response:
+            out["response"] = self.model.format.response(self)
         if blocks:
             out["blocks"] = [stamped(b) for b in self.blocks]
-        out.update({self.model.format.stop_field: self.stop, "usage": self.usage, "interrupted": self.interrupted, "error": self.error})
+        out.update({"interrupted": self.interrupted, "error": self.error})
         return out
 
 
@@ -107,10 +107,10 @@ class Record:
                     s.streams.remove(old)
                     if not s.streams:
                         self.sessions.pop((old.agent, old.session), None)
-        self.tell(stream, "stream.started", snapshot=stream.snapshot(blocks=False))
+        self.tell(stream, "stream.started", snapshot=stream.snapshot(blocks=False, response=False))
 
     def close(self, stream: Stream):
-        self.tell(stream, "stream.ended", snapshot=stream.snapshot(blocks=False, request=False))
+        self.tell(stream, "stream.ended", snapshot=stream.snapshot(blocks=False, request=False))     # the whole response, once
         if self.path:
             with self.lock:
                 os.makedirs(os.path.dirname(self.path), exist_ok=True)

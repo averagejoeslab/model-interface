@@ -97,6 +97,11 @@
   .tree .thinking, .tree .reasoning { color: var(--thinking); }
   .tree .text, .tree .content { color: var(--text-block); }
   .tree .tool_use, .tree .tool_call { color: var(--tool); }
+  pre.json { margin: 0; background: var(--panel); border: 1px solid var(--line); border-radius: 12px; padding: 14px 16px; font: 12px/1.55 var(--mono); overflow: auto; white-space: pre-wrap; word-break: break-word; }
+  .json .k { color: var(--accent); }
+  .json .s { color: var(--text); }
+  .json .n, .json .b { color: var(--tool); }
+  .json .z { color: var(--muted); }
   .hint { color: var(--muted); max-width: 560px; }
   .hint code { font-family: var(--mono); background: var(--panel); border: 1px solid var(--line); padding: 1px 5px; border-radius: 5px; }
   @media (max-width: 760px) { main { grid-template-columns: 1fr; } nav { max-height: 200px; border-right: 0; border-bottom: 1px solid var(--line); } input { width: 120px; } }
@@ -226,11 +231,30 @@
       <div class="kind">${esc(b.type)}<small>${clock(b.started)}</small><small>${b.ended ? span(b.started, b.ended) : "…"}</small></div>
       <div class="body">${esc(bodyOf(b))}</div></div>`;
   }
+  // ── the response, whole, in the provider's shape, composed from the head and the blocks as the server does ──
+  const strip = (b) => Object.fromEntries(Object.entries(b).filter(([k]) => !["index", "started", "ended"].includes(k)));
+  function composeResponse(st) {
+    const head = st.response || {}, blocks = st.blocks || [];
+    if (st.format === "anthropic") {
+      const {content, ...rest} = head;
+      return {id: null, type: "message", role: "assistant", model: null, ...rest, content: blocks.map(strip),
+              stop_reason: head.stop_reason ?? null, stop_sequence: head.stop_sequence ?? null, usage: head.usage || {}};
+    }
+    const {choices, finish_reason, usage, ...rest} = head;
+    const text = blocks.filter((b) => b.type === "content").map((b) => b.content || "").join("");
+    const reasoning = blocks.filter((b) => b.type === "reasoning").map((b) => b.reasoning || "").join("");
+    const calls = blocks.filter((b) => b.type === "tool_call").map((b) => ({id: b.id ?? null, type: "function", function: {name: b.name ?? null, arguments: b.arguments || ""}}));
+    const message = {role: "assistant", content: text || null};
+    if (reasoning) message.reasoning_content = reasoning;
+    if (calls.length) message.tool_calls = calls;
+    return {id: null, object: "chat.completion", created: null, model: null, ...rest,
+            choices: [{index: 0, message, finish_reason: finish_reason ?? choices?.[0]?.finish_reason ?? null}], usage: usage || {}};
+  }
+  const endOf = (st) => { const r = composeResponse(st); return r.stop_reason ? `stop_reason ${r.stop_reason}` : r.choices?.[0]?.finish_reason ? `finish_reason ${r.choices[0].finish_reason}` : ""; };
   function drawFoot(st) {
-    const u = st.usage || {};
+    const u = composeResponse(st).usage || {};
     const tokens = u.input_tokens != null ? `${u.input_tokens} in · ${u.output_tokens} out` : u.prompt_tokens != null ? `${u.prompt_tokens} in · ${u.completion_tokens} out` : "";
-    const parts = [st.ended ? `ended ${clock(st.ended)}` : "streaming", span(st.started, st.ended),
-                   st.stop_reason ? `stop_reason ${st.stop_reason}` : st.finish_reason ? `finish_reason ${st.finish_reason}` : "", tokens];
+    const parts = [st.ended ? `ended ${clock(st.ended)}` : "streaming", span(st.started, st.ended), endOf(st), tokens];
     if (st.interrupted) parts.push(`<span class="cut">cut by the ${esc(st.interrupted.by)} killswitch at ${clock(st.interrupted.at)}</span>`);
     if (st.error) parts.push(`<span class="error">${esc(st.error)}</span>`);
     return parts.filter(Boolean).join("<span>·</span>");
@@ -245,7 +269,7 @@
       <div class="foot">${drawFoot(st)}</div></article>`;
   }
   function title(s) {
-    const modes = `<span class="modes"><button data-mode="cards" class="${mode === "cards" ? "active" : ""}">cards</button><button data-mode="tree" class="${mode === "tree" ? "active" : ""}">tree</button></span>`;
+    const modes = `<span class="modes">${["cards", "tree", "json"].map((m) => `<button data-mode="${m}" class="${mode === m ? "active" : ""}">${m}</button>`).join("")}</span>`;
     return `<h2>${esc(s.agent)} / ${esc(s.session)}</h2><small>${s.count} stream${s.count === 1 ? "" : "s"}${s.interrupted ? ` · ${s.interrupted} cut` : ""}</small>${modes}${sw(s.killswitch, "kill session", "")}`;
   }
   // ── the tree: the same session as one structure, where each thing started, ended, and was stopped ──
@@ -265,7 +289,7 @@
       const lastStream = i === streams.length - 1;
       const g1 = `<span class="guide">      ${lastStream ? "└─" : "├─"}</span>`, g2 = `<span class="guide">      ${lastStream ? "  " : "│ "}</span>`;
       const status = st.interrupted ? `<span class="cutmark">interrupted · cut by the ${esc(st.interrupted.by)} switch at ${clock(st.interrupted.at)}</span>`
-                   : st.ended ? `<span class="level">${esc(st.stop_reason || st.finish_reason || "")}${st.error ? " · error" : ""}</span>` : `<span class="running">streaming</span>`;
+                   : st.ended ? `<span class="level">${esc(endOf(st))}${st.error ? " · error" : ""}</span>` : `<span class="running">streaming</span>`;
       lines.push(`${g1} <span class="node">${esc(st.id)}</span>  <span class="level">stream · ${esc(st.model)} · ${esc(st.provider)}</span>  ${when(st.started, st.ended)}  ${status}`);
       const blocks = st.blocks || [];
       blocks.forEach((b, j) => {
@@ -279,18 +303,33 @@
     });
     return `<pre class="tree">${lines.join("\n")}</pre>`;
   }
-  let treePending = false;
-  function redrawTree() {               // live events redraw the whole tree, at most once a frame
-    if (treePending) return;
-    treePending = true;
-    requestAnimationFrame(() => { treePending = false; const s = selectedSession(); const t = view.querySelector("pre.tree"); if (s && t) t.outerHTML = drawTree(s); });
+  // ── the json: the session as the record returns it, from what this page holds ─────────────
+  function drawJson(s) {
+    const streams = [...s.streams.values()].sort((a, b) => a.started.localeCompare(b.started));
+    const doc = {agent: s.agent, session: s.session, started: s.started, ended: s.ended, streams: streams.map((st) => ({
+      id: st.id, started: st.started, ended: st.ended, provider: st.provider, model: st.model, format: st.format,
+      request: st.request, response: composeResponse(st), blocks: st.blocks, interrupted: st.interrupted, error: st.error})),
+      interrupted: s.interrupted, killswitch: s.killswitch};
+    const html = esc(JSON.stringify(doc, null, 2)).replace(/("(?:\\.|[^"\\])*")(\s*:)?|\b(true|false)\b|\bnull\b|-?\b\d+(?:\.\d+)?(?:[eE][+-]?\d+)?\b/g,
+      (m, str, colon, bool) => str ? (colon ? `<span class="k">${str}</span>${colon}` : `<span class="s">${str}</span>`) : bool ? `<span class="b">${m}</span>` : m === "null" ? `<span class="z">null</span>` : `<span class="n">${m}</span>`);
+    return `<pre class="json">${html}</pre>`;
+  }
+  let redrawPending = false;
+  function redrawTree() {               // live events redraw the tree or the json whole, at most once a frame
+    if (redrawPending) return;
+    redrawPending = true;
+    requestAnimationFrame(() => {
+      redrawPending = false;
+      const s = selectedSession(), t = view.querySelector("pre.tree, pre.json");
+      if (s && t) t.outerHTML = mode === "tree" ? drawTree(s) : drawJson(s);
+    });
   }
   function drawTitle() { const s = selectedSession(); const t = view.querySelector(".title"); if (s && t) t.innerHTML = title(s); }
   function drawSession() {
     const s = selectedSession();
     if (!s) { view.innerHTML = ""; return; }
     const streams = [...s.streams.values()].sort((a, b) => a.started.localeCompare(b.started));
-    view.innerHTML = `<div class="title">${title(s)}</div>` + (mode === "tree" ? drawTree(s) : streams.map(drawStream).join(""));
+    view.innerHTML = `<div class="title">${title(s)}</div>` + (mode === "tree" ? drawTree(s) : mode === "json" ? drawJson(s) : streams.map(drawStream).join(""));
     view.scrollTop = view.scrollHeight;
   }
   const inView = (e) => selected && e.agent === selected.agent && e.session === selected.session;
@@ -305,31 +344,31 @@
       s.count += 1;
       s.ended = null;
       if (!selected) { select(e.agent, e.session); return; }
-      if (inView(e)) { drawTitle(); if (mode === "tree") redrawTree(); else { view.insertAdjacentHTML("beforeend", drawStream(st)); view.scrollTop = view.scrollHeight; } }
+      if (inView(e)) { drawTitle(); if (mode !== "cards") redrawTree(); else { view.insertAdjacentHTML("beforeend", drawStream(st)); view.scrollTop = view.scrollHeight; } }
     },
-    "stream.message"(e, st) { Object.assign(st.message ||= {}, e.message); },
+    "stream.response"(e, st) { Object.assign(st.response ||= {}, e.response); if (inView(e) && mode !== "cards") redrawTree(); },
     "block.started"(e, st) {
       st.blocks.push(e.block);
-      if (inView(e)) { if (mode === "tree") redrawTree(); else { const box = el(st, ".blocks"); if (box) box.insertAdjacentHTML("beforeend", drawBlock(e.block, st)); view.scrollTop = view.scrollHeight; } }
+      if (inView(e)) { if (mode !== "cards") redrawTree(); else { const box = el(st, ".blocks"); if (box) box.insertAdjacentHTML("beforeend", drawBlock(e.block, st)); view.scrollTop = view.scrollHeight; } }
     },
     "block.delta"(e, st) {
       const b = st.blocks[e.index]; if (!b) return;
       b[e.field] = (b[e.field] || "") + e.delta;
-      if (inView(e) && e.field !== "signature") { if (mode === "tree") redrawTree(); else { const body = el(st, `.block[data-index="${e.index}"] .body`); if (body) body.textContent = bodyOf(b); } }
+      if (inView(e) && e.field !== "signature") { if (mode !== "cards") redrawTree(); else { const body = el(st, `.block[data-index="${e.index}"] .body`); if (body) body.textContent = bodyOf(b); } }
     },
     "block.ended"(e, st) {
       st.blocks[e.block.index] = e.block;
-      if (inView(e)) { if (mode === "tree") redrawTree(); else { const node = el(st, `.block[data-index="${e.block.index}"]`); if (node) node.outerHTML = drawBlock(e.block, st); } }
+      if (inView(e)) { if (mode !== "cards") redrawTree(); else { const node = el(st, `.block[data-index="${e.block.index}"]`); if (node) node.outerHTML = drawBlock(e.block, st); } }
     },
     "stream.ended"(e, st) {
       Object.assign(st, e.snapshot, {blocks: st.blocks, request: st.request});
       const s = session(e.agent, e.session, st.started);
       if ([...s.streams.values()].every((x) => x.ended)) s.ended = st.ended;
       if (st.interrupted) s.interrupted += 1;
-      if (inView(e)) { drawTitle(); if (mode === "tree") redrawTree(); else { const node = document.getElementById(`st-${st.id}`); if (node) node.outerHTML = drawStream(st); } }
+      if (inView(e)) { drawTitle(); if (mode !== "cards") redrawTree(); else { const node = document.getElementById(`st-${st.id}`); if (node) node.outerHTML = drawStream(st); } }
       drawNav();
     },
-    "killswitch"(e) { applySwitches(e.state); drawNav(); drawTitle(); if (mode === "tree") redrawTree(); },
+    "killswitch"(e) { applySwitches(e.state); drawNav(); drawTitle(); if (mode !== "cards") redrawTree(); },
   };
   function apply(e) {
     if (e.type === "killswitch") { handlers.killswitch(e); return; }

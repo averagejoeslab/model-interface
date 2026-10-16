@@ -33,7 +33,7 @@ def test_an_anthropic_reading_builds_blocks_with_times_as_the_lines_arrive():
               {"type": "content_block_start", "index": 2, "content_block": {"type": "tool_use", "id": "t1", "name": "shell", "input": {}}},
               {"type": "content_block_delta", "index": 2, "delta": {"type": "input_json_delta", "partial_json": '{"cmd": '}}]:
         r.feed("data: " + json.dumps(e))
-    assert stream.message == {"id": "m1", "model": "x", "role": "assistant"} and stream.usage == {"input_tokens": 3}
+    assert stream.response == {"id": "m1", "model": "x", "role": "assistant", "usage": {"input_tokens": 3}}
     assert [b["type"] for b in stream.blocks] == ["thinking", "text", "tool_use"]
     assert stream.blocks[0]["thinking"] == "Run the tests first." and stream.blocks[0]["signature"] == "sig" and stream.blocks[0]["ended"] is not None
     assert stream.blocks[1]["text"] == "Hi" and stream.blocks[1]["started"] >= stream.blocks[0]["ended"]
@@ -42,8 +42,11 @@ def test_an_anthropic_reading_builds_blocks_with_times_as_the_lines_arrive():
     r.feed('data: {"type": "content_block_stop", "index": 2}')
     r.feed('data: {"type": "message_delta", "delta": {"stop_reason": "tool_use"}, "usage": {"output_tokens": 5}}')
     assert stream.blocks[2]["input"] == {"cmd": "ls"} and stream.blocks[2]["ended"] is not None and r.open is None
-    assert stream.stop == "tool_use" and stream.usage == {"input_tokens": 3, "output_tokens": 5}
-    assert told[:4] == ["stream.message", "block.started", "block.delta", "block.delta"] and told.count("block.ended") == 3
+    r = anthropic.response(stream)
+    assert r["stop_reason"] == "tool_use" and r["usage"] == {"input_tokens": 3, "output_tokens": 5} and r["type"] == "message"
+    assert [c["type"] for c in r["content"]] == ["thinking", "text", "tool_use"] and "started" not in r["content"][0]
+    assert r["content"][2] == {"type": "tool_use", "id": "t1", "name": "shell", "input": {"cmd": "ls"}}
+    assert told[:4] == ["stream.response", "block.started", "block.delta", "block.delta"] and told.count("block.ended") == 3
 
 
 def test_an_openai_reading_infers_the_same_blocks_from_chunks():
@@ -57,13 +60,16 @@ def test_an_openai_reading_infers_the_same_blocks_from_chunks():
               {"id": "c1", "model": "g", "choices": [], "usage": {"prompt_tokens": 3, "completion_tokens": 5}}]:
         r.feed("data: " + json.dumps(c))
     r.feed("data: [DONE]")
-    assert stream.message == {"id": "c1", "model": "g", "role": "assistant"}
+    assert stream.response["id"] == "c1" and stream.response["model"] == "g" and stream.response["object"] == "chat.completion"
     assert [(b["type"], b.get("reasoning") or b.get("content") or b.get("arguments")) for b in stream.blocks] == [("reasoning", "Think first."), ("content", "Hi"), ("tool_call", '{"cmd": "ls"}')]
     assert stream.blocks[2]["id"] == "call_1" and stream.blocks[2]["name"] == "shell" and stream.blocks[2]["call_index"] == 0
-    assert all(b["ended"] is not None for b in stream.blocks) and stream.stop == "tool_calls"
-    assert stream.usage == {"prompt_tokens": 3, "completion_tokens": 5}, "usage keeps the provider's own names"
-    snap = stream.snapshot()
-    assert snap["finish_reason"] == "tool_calls" and "stop_reason" not in snap, "the record uses the format's own word, and only that one"
+    assert all(b["ended"] is not None for b in stream.blocks)
+    r = stream.snapshot()["response"]
+    assert r["id"] == "c1" and r["object"] == "chat.completion" and r["usage"] == {"prompt_tokens": 3, "completion_tokens": 5}
+    assert r["choices"] == [{"index": 0, "finish_reason": "tool_calls", "message": {
+        "role": "assistant", "content": "Hi", "reasoning_content": "Think first.",
+        "tool_calls": [{"id": "call_1", "type": "function", "function": {"name": "shell", "arguments": '{"cmd": "ls"}'}}]}}]
+    assert "stop_reason" not in r, "the response uses the format's own words, and only those"
     assert told.count("block.started") == 3 and told.count("block.ended") == 3
 
 
