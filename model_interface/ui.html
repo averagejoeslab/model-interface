@@ -98,11 +98,23 @@
   .tree .thinking, .tree .reasoning, .tree .reasoning_content { color: var(--thinking); }
   .tree .text, .tree .content { color: var(--text-block); }
   .tree .tool_use, .tree .tool_call, .tree .tool_calls { color: var(--tool); }
-  pre.json { margin: 0; background: var(--panel); border: 1px solid var(--line); border-radius: 12px; padding: 14px 16px; font: 12px/1.55 var(--mono); overflow: auto; white-space: pre-wrap; word-break: break-word; }
-  .json .k { color: var(--accent); }
-  .json .s { color: var(--text); }
-  .json .n, .json .b { color: var(--tool); }
-  .json .z { color: var(--muted); }
+  .structure { background: var(--panel); border: 1px solid var(--line); border-radius: 12px; padding: 10px 14px 14px; font: 12.5px/1.6 var(--mono); overflow: auto; }
+  .structure .bar { display: flex; gap: 8px; margin-bottom: 6px; font: 12px system-ui, sans-serif; color: var(--muted); align-items: center; }
+  .structure .bar button { font: inherit; padding: 2px 8px; border-radius: 6px; }
+  .structure .node { margin-left: 0; }
+  .structure .children { margin-left: 18px; border-left: 1px solid var(--line); padding-left: 10px; }
+  .structure .row { display: flex; align-items: baseline; gap: 6px; white-space: pre-wrap; word-break: break-word; }
+  .structure .tog { cursor: pointer; color: var(--muted); user-select: none; width: 12px; display: inline-block; flex: none; }
+  .structure .tog:hover { color: var(--accent); }
+  .structure .more { width: auto; color: var(--accent); font-size: 11px; }
+  .structure .k { color: var(--accent); flex: none; }
+  .structure .meta { color: var(--muted); font-size: 11px; }
+  .structure .s { color: var(--text); }
+  .structure .n, .structure .b { color: var(--tool); }
+  .structure .z { color: var(--muted); }
+  .structure .open-piece > .row > .k { text-decoration: underline dotted var(--live); }
+  .structure .fresh { background: color-mix(in srgb, var(--live) 28%, transparent); border-radius: 3px; animation: fade 1.2s forwards; }
+  @keyframes fade { to { background: transparent; } }
   .hint { color: var(--muted); max-width: 560px; }
   .hint code { font-family: var(--mono); background: var(--panel); border: 1px solid var(--line); padding: 1px 5px; border-radius: 5px; }
   @media (max-width: 760px) { main { grid-template-columns: 1fr; } nav { max-height: 200px; border-right: 0; border-bottom: 1px solid var(--line); } input { width: 120px; } }
@@ -250,12 +262,14 @@
   const OURS = ["at", "started", "ended"];
   const strip = (b) => Object.fromEntries(Object.entries(b).filter(([k]) => !OURS.includes(k) && k !== "partial_json"));
   const kindOf = (b) => (b.type || b.at.split(".").pop()).replace(/\[.*$/, "");
-  function composeResponse(st) {
+  function composeResponse(st, withTimes = false) {
     const head = structuredClone(st.response || {}), blocks = st.blocks || [];
+    const piece = withTimes ? (b) => Object.fromEntries(Object.entries(b).filter(([k]) => k !== "partial_json" || !b.ended)) : strip;
     if (st.format === "anthropic") {
-      return {...head, content: blocks.map(strip)};
+      return {...head, content: blocks.map(piece)};
     }
     const choices = head.choices || [{index: 0, message: {}}];
+    delete head.blocks; delete head.choices;
     for (const b of blocks) {                          // each piece back at its place in the message
       const m = (choices[0].message ||= {});
       const path = b.at.replace(/^choices\[\d+\]\.message\./, "");
@@ -264,7 +278,7 @@
       else m[path] = b[path];
     }
     delete head.obfuscation;
-    return {...head, object: "chat.completion", choices};
+    return {...head, object: "chat.completion", choices, ...(withTimes ? {blocks: blocks.map(piece)} : {})};
   }
   const endOf = (st) => { const r = composeResponse(st); return r.stop_reason ? `stop_reason ${r.stop_reason}` : r.choices?.[0]?.finish_reason ? `finish_reason ${r.choices[0].finish_reason}` : ""; };
   function drawFoot(st) {
@@ -285,7 +299,7 @@
       <div class="foot">${drawFoot(st)}</div></article>`;
   }
   function title(s) {
-    const modes = `<span class="modes">${["cards", "tree", "json"].map((m) => `<button data-mode="${m}" class="${mode === m ? "active" : ""}">${m}</button>`).join("")}</span>`;
+    const modes = `<span class="modes">${["cards", "tree", "structure"].map((m) => `<button data-mode="${m}" class="${mode === m ? "active" : ""}">${m}</button>`).join("")}</span>`;
     return `<h2>${esc(s.agent)} / ${esc(s.session)}</h2><small>${s.count} stream${s.count === 1 ? "" : "s"}${s.interrupted ? ` · ${s.interrupted} cut` : ""}</small>${modes}${sw(s.killswitch, "kill session", "")}`;
   }
   // ── the tree: the same session as one structure, where each thing started, ended, and was stopped ──
@@ -319,25 +333,78 @@
     });
     return `<pre class="tree">${lines.join("\n")}</pre>`;
   }
-  // ── the json: the session as the record returns it, from what this page holds ─────────────
-  function drawJson(s) {
+  // ── the structure: the session document as nested, collapsible nodes that grow in place ─────────
+  const collapsed = new Set();                        // paths the viewer folded; everything else stays open as it grows
+  const opened = new Set();                           // request bodies the viewer unfolded; requests are big and never change
+  let foldRequests = true;
+  let followOpen = true;                              // keep the piece that is growing in view
+  const isFolded = (path) => collapsed.has(path) || (foldRequests && path.endsWith(".request") && !opened.has(path));
+  const seen = new Map();                             // path -> last rendered value, to flash what changed
+  const isObj = (v) => v && typeof v === "object";
+  function docOf(s) {
     const streams = [...s.streams.values()].sort((a, b) => a.started.localeCompare(b.started));
-    const doc = {agent: s.agent, session: s.session, started: s.started, ended: s.ended, streams: streams.map((st) => ({
+    return {agent: s.agent, session: s.session, started: s.started, ended: s.ended, killswitch: s.killswitch, streams: streams.map((st) => ({
       id: st.id, started: st.started, ended: st.ended, provider: st.provider, model: st.model, format: st.format,
-      request: st.request, response: composeResponse(st), blocks: st.blocks, interrupted: st.interrupted, error: st.error})),
-      interrupted: s.interrupted, killswitch: s.killswitch};
-    const html = esc(JSON.stringify(doc, null, 2)).replace(/("(?:\\.|[^"\\])*")(\s*:)?|\b(true|false)\b|\bnull\b|-?\b\d+(?:\.\d+)?(?:[eE][+-]?\d+)?\b/g,
-      (m, str, colon, bool) => str ? (colon ? `<span class="k">${str}</span>${colon}` : `<span class="s">${str}</span>`) : bool ? `<span class="b">${m}</span>` : m === "null" ? `<span class="z">null</span>` : `<span class="n">${m}</span>`);
-    return `<pre class="json">${html}</pre>`;
+      request: st.request, response: composeResponse(st, true), interrupted: st.interrupted, error: st.error}))};
   }
+  const unfolded = new Set();                         // long strings the viewer opened
+  function leaf(v, path, live) {
+    if (typeof v === "string") {
+      if (!live && v.length > 240 && !unfolded.has(path)) return `<span class="s">"${esc(v.slice(0, 160))}</span><span class="tog more" data-more="${esc(path)}"> … ${v.length - 160} more</span>`;
+      return `<span class="s">"${esc(v)}"</span>`;
+    }
+    if (v === null || v === undefined) return `<span class="z">null</span>`;
+    return `<span class="${typeof v === "boolean" ? "b" : "n"}">${esc(String(v))}</span>`;
+  }
+  function node(key, v, path, inOpen, fresh) {
+    const changed = fresh.has(path);
+    if (!isObj(v)) {
+      seen.set(path, JSON.stringify(v));
+      return `<div class="row"><span class="tog"></span><span class="k">${esc(key)}</span>: <span class="${changed ? "fresh" : ""}">${leaf(v, path, inOpen)}</span></div>`;
+    }
+    const entries = Array.isArray(v) ? v.map((x, i) => [i, x]) : Object.entries(v);
+    const folded = isFolded(path);
+    const meta = Array.isArray(v) ? `[${entries.length}]` : `{${entries.length}}`;
+    const live = isObj(v) && !Array.isArray(v) && "at" in v && v.ended === null;        // a piece still growing
+    return `<div class="node${live ? " open-piece" : ""}"><div class="row"><span class="tog" data-path="${esc(path)}">${folded ? "▸" : "▾"}</span><span class="k">${esc(key)}</span><span class="meta">${meta}${live ? " · open" : ""}</span></div>` +
+      (folded ? "" : `<div class="children">${entries.map(([k, x]) => node(String(k), x, `${path}.${k}`, inOpen || live, fresh)).join("")}</div>`) + `</div>`;
+  }
+  function drawStructure(s) {
+    const doc = docOf(s), fresh = new Set();
+    (function walk(v, path) {                      // what changed since the last draw: a leaf whose value differs
+      if (!isObj(v)) { if (seen.has(path) && seen.get(path) !== JSON.stringify(v)) fresh.add(path); return; }
+      for (const [k, x] of Array.isArray(v) ? v.map((x, i) => [i, x]) : Object.entries(v)) walk(x, `${path}.${k}`);
+    })(doc, "$");
+    return `<div class="structure"><div class="bar"><span>the session as the record holds it, growing as the stream does</span>
+      <button data-fold="all">collapse all</button><button data-fold="none">expand all</button><button data-fold="requests">${foldRequests ? "show" : "fold"} requests</button><button data-fold="follow">${followOpen ? "stop following" : "follow growth"}</button></div>` +
+      node("session", doc, "$", false, fresh) + `</div>`;
+  }
+  view.addEventListener("click", (e) => {
+    const m = e.target.closest(".structure .more[data-more]");
+    if (m) { unfolded.add(m.dataset.more); drawSession(); return; }
+    const t = e.target.closest(".structure .tog[data-path]");
+    if (t) {
+      const path = t.dataset.path;
+      if (isFolded(path)) { collapsed.delete(path); opened.add(path); } else { collapsed.add(path); opened.delete(path); }
+      drawSession(); return;
+    }
+    const f = e.target.closest(".structure button[data-fold]");
+    if (!f) return;
+    if (f.dataset.fold === "all") { collapsed.clear(); (function fold(v, path) { if (!isObj(v)) return; if (path !== "$") collapsed.add(path); for (const [k, x] of Array.isArray(v) ? v.map((x, i) => [i, x]) : Object.entries(v)) fold(x, `${path}.${k}`); })(docOf(selectedSession()), "$"); }
+    if (f.dataset.fold === "none") { collapsed.clear(); opened.clear(); foldRequests = false; }
+    if (f.dataset.fold === "requests") foldRequests = !foldRequests;
+    if (f.dataset.fold === "follow") followOpen = !followOpen;
+    drawSession();
+  });
   let redrawPending = false;
   function redrawTree() {               // live events redraw the tree or the json whole, at most once a frame
     if (redrawPending) return;
     redrawPending = true;
     requestAnimationFrame(() => {
       redrawPending = false;
-      const s = selectedSession(), t = view.querySelector("pre.tree, pre.json");
-      if (s && t) t.outerHTML = mode === "tree" ? drawTree(s) : drawJson(s);
+      const s = selectedSession(), t = view.querySelector("pre.tree, .structure");
+      if (s && t) t.outerHTML = mode === "tree" ? drawTree(s) : drawStructure(s);
+      if (mode === "structure" && followOpen) { const o = view.querySelector(".open-piece"); if (o) o.scrollIntoView({block: "nearest"}); }
     });
   }
   function drawTitle() { const s = selectedSession(); const t = view.querySelector(".title"); if (s && t) t.innerHTML = title(s); }
@@ -345,8 +412,9 @@
     const s = selectedSession();
     if (!s) { view.innerHTML = ""; return; }
     const streams = [...s.streams.values()].sort((a, b) => a.started.localeCompare(b.started));
-    view.innerHTML = `<div class="title">${title(s)}</div>` + (mode === "tree" ? drawTree(s) : mode === "json" ? drawJson(s) : streams.map(drawStream).join(""));
-    view.scrollTop = view.scrollHeight;
+    const top = view.scrollTop;
+    view.innerHTML = `<div class="title">${title(s)}</div>` + (mode === "tree" ? drawTree(s) : mode === "structure" ? drawStructure(s) : streams.map(drawStream).join(""));
+    view.scrollTop = mode === "structure" ? top : view.scrollHeight;
   }
   const inView = (e) => selected && e.agent === selected.agent && e.session === selected.session;
   const el = (st, sel) => document.querySelector(`#st-${CSS.escape(st.id)} ${sel}`);
