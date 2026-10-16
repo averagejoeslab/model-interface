@@ -17,13 +17,13 @@ def openai_body(model="gpt", **extra):
     return {"model": model, "stream": True, "messages": [{"role": "user", "content": "hi"}], **extra}
 
 
-def watch(server, session, seen, ready):
+def watch(server, session, seen, ready, path=None):
     """Follow a session's live feed, stamping each record event with when it arrived."""
-    with httpx.stream("GET", f"{server}/v1/sessions/{session}/live", headers=H, timeout=30) as r:
+    with httpx.stream("GET", path or f"{server}/v1/sessions/{session}/live", headers=H, timeout=30) as r:
         for line in r.iter_lines():
             if line.startswith("data:"):
                 e = json.loads(line[5:])
-                if "session" in e and "type" not in e:
+                if "scope" in e and "type" not in e:
                     ready.set()
                     continue
                 seen.append((time.time(), e))
@@ -104,9 +104,9 @@ def test_a_session_holds_streams_of_blocks_with_times_at_every_level(server, pro
     assert th["thinking"] == "Where am I?" and th["signature"] == "sig_abc" and th["started"] <= th["ended"] <= tx["started"]
     assert tx["text"] == "Hello there, friend." and tx["ended"] <= tu["started"] <= tu["ended"] <= first["ended"]
     assert tu == {"index": 2, "type": "tool_use", "started": tu["started"], "ended": tu["ended"], "id": "t1", "name": "shell", "input": {"cmd": "pwd"}}
-    assert first["stop_reason"] == "tool_use" and first["usage"] == {"input_tokens": 10, "output_tokens": 7} and first["interrupted"] is False
+    assert first["stop_reason"] == "tool_use" and first["usage"] == {"input_tokens": 10, "output_tokens": 7} and first["error"] is None
     assert httpx.get(f"{server}/v1/streams/{first['id']}", headers=H).json()["blocks"] == first["blocks"]
-    assert httpx.get(f"{server}/v1/sessions", headers=H).json()["data"][0] == {"session": "s-rec", "started": s["started"], "ended": s["ended"], "streams": 2, "interrupted": 0}
+    assert httpx.get(f"{server}/v1/sessions", headers=H).json()["data"][0] == {"session": "s-rec", "key": "team-test", "started": s["started"], "ended": s["ended"], "streams": 2}
     assert "blocks" not in httpx.get(f"{server}/v1/sessions/s-rec", headers=H, params={"blocks": "false"}).json()["streams"][0]
 
 
@@ -146,7 +146,7 @@ def test_the_live_feed_shows_each_block_opening_growing_and_closing_before_the_s
     deltas = [e for _, e in seen if e["type"] == "block.delta"]
     assert {d["field"] for d in deltas} == {"thinking", "signature", "text", "input"}
     ended = [e for _, e in seen if e["type"] == "stream.ended"][0]
-    assert ended["stream"] and ended["stream"]["stop_reason"] == "tool_use" and "request" not in ended["stream"]
+    assert ended["stream"].startswith("str_") and ended["snapshot"]["stop_reason"] == "tool_use" and "request" not in ended["snapshot"]
 
 
 def test_the_live_feed_works_for_chat_completions_too(server, provider):
@@ -161,54 +161,35 @@ def test_the_live_feed_works_for_chat_completions_too(server, provider):
     assert opened == ["reasoning", "content"] and [e["type"] for _, e in seen][-1] == "stream.ended"
 
 
-# ── the killswitch ────────────────────────────────────────────────────────────
-
-def read_stream(server, path, body, session, after=None):
-    seen = []
-    with httpx.stream("POST", f"{server}{path}", headers={**H, "X-Session": session}, json=body) as r:
-        stream = r.headers["x-stream"]
-        for line in r.iter_lines():
-            if line.startswith("data:"):
-                seen.append(line[5:].strip())
-                if after and len(seen) == after[0]:
-                    after[1](stream)
-    return stream, seen
 
 
-def test_the_session_killswitch_cuts_a_running_stream_and_records_the_block_it_landed_in(server, provider):
-    provider.text, provider.delay = "one two three four five six seven eight nine ten", 0.03
-    stream, seen = read_stream(server, "/v1/messages", anthropic_body(), "s-kill",
-                               after=(5, lambda _: httpx.put(f"{server}/v1/killswitch/s-kill", headers=H, json={"on": True})))
-    events = [json.loads(s) for s in seen]
-    assert [e["type"] for e in events[-3:]] == ["content_block_stop", "message_delta", "message_stop"]
-    assert events[-2]["delta"]["stop_reason"] == "interrupted" and len(events) < 14 and provider.closed_early
-    rec = httpx.get(f"{server}/v1/streams/{stream}", headers=H).json()
-    assert rec["interrupted"] is True and rec["stop_reason"] == "interrupted" and rec["cut"]["by"] == "killswitch"
-    assert rec["cut"]["block"] == {"index": 0, "type": "text"} and rec["blocks"][0]["text"].startswith("one two") and rec["blocks"][0]["ended"]
-    assert httpx.post(f"{server}/v1/messages", headers={**H, "X-Session": "s-kill"}, json=anthropic_body()).status_code == 423
-    httpx.put(f"{server}/v1/killswitch/s-kill", headers=H, json={"on": False})
-    assert httpx.post(f"{server}/v1/messages", headers={**H, "X-Session": "s-kill"}, json=anthropic_body()).status_code == 200
-
-
-def test_the_global_killswitch_cuts_an_openai_stream_and_refuses_everything_until_off(server, provider):
-    provider.text, provider.delay = "one two three four five six seven eight nine ten", 0.03
-    stream, seen = read_stream(server, "/v1/chat/completions", openai_body(), "s-any",
-                               after=(5, lambda _: httpx.put(f"{server}/v1/killswitch", headers=H, json={"on": True})))
-    last = json.loads(seen[-2])
-    assert seen[-1] == "[DONE]" and last["interrupted"] is True and provider.closed_early
-    assert httpx.get(f"{server}/v1/streams/{stream}", headers=H).json()["cut"]["block"]["type"] == "content"
-    assert httpx.post(f"{server}/v1/messages", headers={**H, "X-Session": "anything"}, json=anthropic_body()).status_code == 423
-    httpx.put(f"{server}/v1/killswitch", headers=H, json={"on": False})
-    assert httpx.post(f"{server}/v1/messages", headers={**H, "X-Session": "anything"}, json=anthropic_body()).status_code == 200
-
-
-def test_the_killswitch_cuts_within_a_tenth_of_a_second_even_while_the_provider_is_silent(server, provider):
-    provider.stall = (3, 8.0)
-    t0 = time.time()
-    threading.Timer(0.5, lambda: httpx.put(f"{server}/v1/killswitch/s-silent", headers=H, json={"on": True})).start()
-    stream, seen = read_stream(server, "/v1/messages", anthropic_body(), "s-silent")
-    assert time.time() - t0 < 1.5
-    assert json.loads(seen[-2])["delta"]["stop_reason"] == "interrupted"
-    httpx.put(f"{server}/v1/killswitch/s-silent", headers=H, json={"on": False})
+def test_the_global_feed_carries_every_session_and_takes_the_key_as_a_query_parameter(server, provider):
+    provider.delay = 0.01
+    seen, ready = [], threading.Event()
+    threading.Thread(target=watch, args=(server, None, seen, ready, f"{server}/v1/live?key=mi-test-key"), daemon=True).start()
+    assert ready.wait(5)
+    a = Anthropic(base_url=server, api_key="mi-test-key")
+    with a.messages.stream(model="coder", max_tokens=50, messages=[{"role": "user", "content": "go"}], extra_headers={"X-Session": "s-global"}) as s:
+        s.get_final_message()
     time.sleep(0.3)
-    assert provider.closed_early
+    assert seen and all(e["session"] == "s-global" and e["key"] == "team-test" and e["stream"] == seen[0][1]["stream"] for _, e in seen)
+    assert [e["type"] for _, e in seen][0] == "stream.started" and seen[0][1]["snapshot"]["request"]["messages"][0]["content"] == "go"
+    assert httpx.get(f"{server}/v1/live?key=nope").status_code == 401
+
+
+# ── the record by caller, and the page ────────────────────────────────────────
+
+def test_callers_are_listed_with_their_sessions_and_streams(server):
+    a = Anthropic(base_url=server, api_key="mi-test-key")
+    for session in ("c-one", "c-two", "c-two"):
+        with a.messages.stream(model="coder", max_tokens=50, messages=[{"role": "user", "content": "hi"}], extra_headers={"X-Session": session}) as s:
+            s.get_final_message()
+    callers = httpx.get(f"{server}/v1/callers", params={"key": "mi-test-key"}).json()["data"]
+    assert len(callers) == 1 and callers[0]["caller"] == "team-test" and callers[0]["sessions"] == 2 and callers[0]["streams"] == 3 and callers[0]["last"]
+
+
+def test_the_page_is_served_at_the_root_and_the_record_needs_a_key(server):
+    page = httpx.get(f"{server}/")
+    assert page.status_code == 200 and page.headers["content-type"].startswith("text/html") and "/v1/live?key=" in page.text
+    assert httpx.get(f"{server}/v1/sessions").status_code == 401
+    assert httpx.get(f"{server}/v1/sessions", headers={"authorization": "Bearer mi-test-key"}).status_code == 200

@@ -11,7 +11,7 @@ from fastapi.responses import JSONResponse, StreamingResponse
 
 from model_interface.config import Config
 from model_interface.formats import FORMATS
-from model_interface.gateway import Gateway, Killswitch, Record
+from model_interface.gateway import Gateway, Record
 from model_interface.providers import Model, Provider
 from model_interface.server import create_app
 
@@ -132,7 +132,7 @@ def config(provider):
 
 @pytest.fixture
 def gateway(config):
-    return Gateway(config.models, Killswitch(), Record(None))
+    return Gateway(config.models, Record(None))
 
 
 @pytest.fixture

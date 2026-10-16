@@ -62,24 +62,6 @@ def test_an_openai_reading_infers_the_same_blocks_from_chunks():
     assert told.count("block.started") == 3 and told.count("block.ended") == 3
 
 
-def test_closing_an_anthropic_stream_leaves_a_whole_message():
-    stream = fresh("anthropic")
-    r = anthropic.reading(stream, lambda kind, **p: None)
-    r.feed('data: {"type": "message_start", "message": {"id": "m1", "model": "x", "usage": {}}}')
-    r.feed('data: {"type": "content_block_start", "index": 0, "content_block": {"type": "thinking", "thinking": "", "signature": ""}}')
-    events = [json.loads(s.split("data: ")[1]) for s in anthropic.closing(r)]
-    assert [e["type"] for e in events] == ["content_block_stop", "message_delta", "message_stop"]
-    assert events[0]["index"] == 0 and events[1]["delta"]["stop_reason"] == "interrupted"
-    bare = [json.loads(s.split("data: ")[1]) for s in anthropic.closing(anthropic.reading(fresh("anthropic"), lambda kind, **p: None))]
-    assert [e["type"] for e in bare] == ["message_start", "message_delta", "message_stop"]
-
-
-def test_closing_an_openai_stream_marks_the_chunk_and_ends():
-    out = openai.closing(openai.reading(fresh("openai"), lambda kind, **p: None))
-    chunk = json.loads(out[0][6:])
-    assert chunk["interrupted"] is True and chunk["choices"][0]["finish_reason"] == "stop" and out[1] == "data: [DONE]\n\n"
-
-
 def test_the_body_is_split_into_what_the_sdk_knows_and_extra_body():
     import anthropic as sdk
     client = sdk.Anthropic(api_key="x", base_url="http://127.0.0.1:1")

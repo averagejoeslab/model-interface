@@ -5,8 +5,9 @@
 
     MI_URL=http://127.0.0.1:8080 MI_KEY=... MI_SESSION=demo uv run examples/agent.py "The tests are failing. Find out why and fix it."
 
-The gateway holds the provider key, records every call under the session, and can cut any call
-with the killswitch. The tool runs here; that line is where a sealed execution call goes.
+The gateway holds the provider key and records every call under the session, block by block, as
+it streams; open the gateway's page to watch. The tool runs here; that line is where a sealed
+execution call goes.
 """
 import os
 import subprocess
@@ -44,9 +45,6 @@ for _ in range(8):
         message = stream.get_final_message()
     print()
     messages.append({"role": "assistant", "content": message.content})
-    if message.stop_reason == "interrupted":
-        print("[cut by the killswitch]")
-        break
     calls = [b for b in message.content if b.type == "tool_use"]
     if not calls:
         break

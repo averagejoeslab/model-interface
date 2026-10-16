@@ -1,9 +1,9 @@
 [project]
 name = "model-interface"
 version = "0.1.0"
-description = "Model calls and tool execution, taken out of the agent and put behind one endpoint, in a sandbox."
+description = "A gateway for model calls with real-time observability: native pass-through in both wire formats, streaming only, every stream recorded block by block as it runs."
 requires-python = ">=3.11"
-dependencies = ["fastapi>=0.110", "uvicorn>=0.29", "httpx>=0.27"]
+dependencies = ["fastapi>=0.110", "uvicorn>=0.29", "httpx>=0.27", "anthropic>=0.50", "openai>=1.70"]
 
 [project.optional-dependencies]
 dev = ["pytest>=8"]
@@ -17,3 +17,6 @@ build-backend = "setuptools.build_meta"
 
 [tool.setuptools]
 packages = ["model_interface"]
+
+[tool.setuptools.package-data]
+model_interface = ["ui.html"]

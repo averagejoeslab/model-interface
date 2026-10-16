@@ -1,13 +1,11 @@
 """The two wire formats, each passed through by its own SDK.
 
-A Format knows how to open a streaming call with the native SDK, how to read the stream's lines
-into the record's blocks as they arrive, and how to end a stream early so the caller still sees a
-whole message. It never changes what goes over the wire.
+A Format knows how to open a streaming call with the native SDK and how to read the stream's lines
+into the record's blocks as they arrive. It never changes what goes over the wire.
 """
 import inspect
 import json
 import time
-import uuid
 from abc import ABC, abstractmethod
 
 import anthropic
@@ -27,7 +25,7 @@ class Reading:
     """Reads a stream's lines into a Stream record, block by block, telling a listener as it goes.
 
     The record is the live object: a block appears when it opens, grows with each delta, and gets
-    its end time when it closes. Only the record is touched; the wire is forwarded untouched.
+    its end time when it closes.
     """
 
     def __init__(self, stream, listener=lambda kind, **payload: None):
@@ -41,8 +39,6 @@ class Reading:
             self.take(data)
 
     def take(self, data: dict): ...
-
-    # ── what every format does to the record ─────────────────────────────────
 
     def start(self, **message):
         self.stream.message.update(message)
@@ -92,13 +88,6 @@ class Format(ABC):
 
     @abstractmethod
     def reading(self, stream, listener) -> Reading: ...
-
-    @abstractmethod
-    def closing(self, reading: Reading) -> list[str]:
-        """The stream text that ends an interrupted stream so the message is whole."""
-
-    @abstractmethod
-    def error_line(self, message: str) -> str: ...
 
     @staticmethod
     def status_of(error):
@@ -172,24 +161,6 @@ class AnthropicFormat(Format):
     def reading(self, stream, listener):
         return AnthropicReading(stream, listener)
 
-    def closing(self, reading):
-        def sse(e):
-            return f"event: {e['type']}\ndata: {json.dumps(e)}\n\n"
-        out = []
-        if not reading.stream.message:
-            out.append(sse({"type": "message_start", "message": {"id": f"msg_{uuid.uuid4().hex[:12]}", "type": "message", "role": "assistant",
-                                                                 "model": "", "content": [], "stop_reason": None, "stop_sequence": None,
-                                                                 "usage": {"input_tokens": 0, "output_tokens": 0}}}))
-        if reading.open is not None:
-            out.append(sse({"type": "content_block_stop", "index": reading.open["index"]}))
-        out.append(sse({"type": "message_delta", "delta": {"stop_reason": "interrupted", "stop_sequence": None},
-                        "usage": {"output_tokens": reading.stream.usage.get("output_tokens", 0)}}))
-        out.append(sse({"type": "message_stop"}))
-        return out
-
-    def error_line(self, message):
-        return f"event: error\ndata: {json.dumps({'type': 'error', 'error': {'type': 'upstream_error', 'message': message}})}\n\n"
-
 
 # ── OpenAI Chat Completions ──────────────────────────────────────────────────
 
@@ -242,15 +213,6 @@ class OpenAIFormat(Format):
 
     def reading(self, stream, listener):
         return OpenAIReading(stream, listener)
-
-    def closing(self, reading):
-        chunk = {"id": reading.stream.message.get("id") or f"chatcmpl-{uuid.uuid4().hex[:12]}", "object": "chat.completion.chunk",
-                 "created": int(time.time()), "model": reading.stream.message.get("model") or "", "interrupted": True,
-                 "choices": [{"index": 0, "delta": {}, "finish_reason": "stop"}]}
-        return [f"data: {json.dumps(chunk)}\n\n", "data: [DONE]\n\n"]
-
-    def error_line(self, message):
-        return f"data: {json.dumps({'error': {'type': 'upstream_error', 'message': message}})}\n\n"
 
 
 FORMATS = {"anthropic": AnthropicFormat(), "openai": OpenAIFormat()}

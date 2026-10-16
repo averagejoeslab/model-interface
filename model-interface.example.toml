@@ -15,11 +15,6 @@ format = "openai"
 url = "https://api.openai.com/v1"
 key = "env:OPENAI_API_KEY"
 
-[providers.groq]
-format = "openai"
-url = "https://api.groq.com/openai/v1"
-key = "env:GROQ_API_KEY"
-
 [providers.ollama]                     # local, in Messages format; no key
 format = "anthropic"
 url = "http://localhost:11434"
@@ -31,6 +26,5 @@ url = "http://localhost:11434/v1"
 [models]                               # the aliases callers use; each speaks its provider's format
 coder = { provider = "anthropic", model = "claude-sonnet-5-5" }
 gpt = { provider = "openai", model = "gpt-5" }
-fast = { provider = "groq", model = "llama-3.3-70b-versatile" }
 local = { provider = "ollama", model = "qwen2.5:3b" }
 local-openai = { provider = "ollama-openai", model = "qwen2.5:3b" }

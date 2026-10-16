@@ -1,0 +1,253 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>model-interface</title>
+<link rel="icon" href="data:,">
+<style>
+  :root {
+    --bg: #f6f7f9; --panel: #ffffff; --line: #e3e6ea; --text: #15181d; --muted: #6b7280;
+    --accent: #2563eb; --accent-soft: #dbeafe; --ok: #16a34a; --bad: #dc2626; --live: #f59e0b;
+    --thinking: #7c3aed; --text-block: #2563eb; --tool: #d97706; --mono: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root:not([data-theme="light"]) {
+      --bg: #0f1115; --panel: #171a21; --line: #272b35; --text: #e6e8ec; --muted: #8b93a1;
+      --accent: #60a5fa; --accent-soft: #1e293b; --thinking: #a78bfa; --text-block: #60a5fa; --tool: #fbbf24;
+    }
+  }
+  * { box-sizing: border-box; }
+  body { margin: 0; background: var(--bg); color: var(--text); font: 14px/1.5 system-ui, -apple-system, "Segoe UI", sans-serif; height: 100vh; display: flex; flex-direction: column; }
+  header { display: flex; align-items: center; gap: 12px; padding: 10px 16px; border-bottom: 1px solid var(--line); background: var(--panel); }
+  header h1 { font-size: 15px; margin: 0; font-weight: 600; letter-spacing: .01em; }
+  header h1 span { color: var(--muted); font-weight: 400; }
+  header .spacer { flex: 1; }
+  header input { font: inherit; padding: 6px 10px; border: 1px solid var(--line); border-radius: 8px; background: var(--bg); color: var(--text); width: 220px; }
+  header button { font: inherit; padding: 6px 12px; border: 1px solid var(--line); border-radius: 8px; background: var(--panel); color: var(--text); cursor: pointer; }
+  header button:hover { border-color: var(--accent); }
+  .dot { width: 9px; height: 9px; border-radius: 50%; background: var(--muted); display: inline-block; }
+  .dot.on { background: var(--ok); box-shadow: 0 0 0 3px color-mix(in srgb, var(--ok) 25%, transparent); }
+  .dot.off { background: var(--bad); }
+  main { flex: 1; display: grid; grid-template-columns: 260px 1fr; min-height: 0; }
+  nav { border-right: 1px solid var(--line); background: var(--panel); overflow: auto; padding: 8px 0; }
+  nav h2 { font-size: 11px; text-transform: uppercase; letter-spacing: .08em; color: var(--muted); margin: 10px 16px 4px; font-weight: 600; }
+  nav .caller { padding: 6px 16px 2px; font-weight: 600; display: flex; justify-content: space-between; }
+  nav .caller small { color: var(--muted); font-weight: 400; }
+  nav .session { display: flex; align-items: center; gap: 8px; padding: 6px 16px 6px 24px; cursor: pointer; border-left: 2px solid transparent; }
+  nav .session:hover { background: var(--bg); }
+  nav .session.selected { border-left-color: var(--accent); background: var(--accent-soft); }
+  nav .session .name { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-family: var(--mono); font-size: 13px; }
+  nav .session .count { color: var(--muted); font-size: 12px; }
+  nav .empty { color: var(--muted); padding: 8px 16px; font-size: 13px; }
+  section { overflow: auto; padding: 16px 20px 40px; }
+  section .title { display: flex; align-items: baseline; gap: 12px; margin-bottom: 12px; }
+  section .title h2 { margin: 0; font-size: 16px; font-family: var(--mono); }
+  section .title small { color: var(--muted); }
+  .stream { background: var(--panel); border: 1px solid var(--line); border-radius: 12px; margin-bottom: 14px; overflow: hidden; }
+  .stream.running { border-color: var(--live); }
+  .stream .head { display: flex; align-items: center; gap: 10px; padding: 10px 14px; border-bottom: 1px solid var(--line); font-size: 13px; }
+  .stream .head .model { font-weight: 600; }
+  .stream .head .id { font-family: var(--mono); color: var(--muted); font-size: 12px; }
+  .stream .head .when { color: var(--muted); margin-left: auto; font-variant-numeric: tabular-nums; }
+  .badge { font-size: 11px; padding: 1px 7px; border-radius: 999px; border: 1px solid var(--line); color: var(--muted); text-transform: lowercase; }
+  .badge.live { color: var(--live); border-color: var(--live); animation: pulse 1.2s infinite; }
+  @keyframes pulse { 50% { opacity: .45; } }
+  .ask { padding: 10px 14px; color: var(--muted); font-size: 13px; border-bottom: 1px solid var(--line); white-space: pre-wrap; max-height: 120px; overflow: auto; }
+  .ask b { color: var(--text); font-weight: 600; margin-right: 6px; }
+  .blocks { padding: 6px 14px; }
+  .block { display: grid; grid-template-columns: 92px 1fr; gap: 10px; padding: 8px 0; border-bottom: 1px dashed var(--line); }
+  .block:last-child { border-bottom: 0; }
+  .block .kind { font-size: 12px; font-weight: 600; }
+  .block .kind small { display: block; color: var(--muted); font-weight: 400; font-variant-numeric: tabular-nums; }
+  .block.thinking .kind, .block.reasoning .kind { color: var(--thinking); }
+  .block.text .kind, .block.content .kind { color: var(--text-block); }
+  .block.tool_use .kind, .block.tool_call .kind { color: var(--tool); }
+  .block .body { white-space: pre-wrap; word-break: break-word; font-size: 13px; }
+  .block.thinking .body, .block.reasoning .body { color: var(--muted); font-style: italic; }
+  .block.tool_use .body, .block.tool_call .body { font-family: var(--mono); font-size: 12.5px; }
+  .block.open .body::after { content: "▍"; color: var(--live); animation: pulse .8s infinite; }
+  .foot { display: flex; gap: 14px; padding: 8px 14px; border-top: 1px solid var(--line); color: var(--muted); font-size: 12px; font-variant-numeric: tabular-nums; }
+  .foot .error { color: var(--bad); }
+  .hint { color: var(--muted); max-width: 560px; }
+  .hint code { font-family: var(--mono); background: var(--panel); border: 1px solid var(--line); padding: 1px 5px; border-radius: 5px; }
+  @media (max-width: 760px) { main { grid-template-columns: 1fr; } nav { max-height: 180px; border-right: 0; border-bottom: 1px solid var(--line); } header input { width: 130px; } }
+</style>
+</head>
+<body>
+<header>
+  <h1>model-interface <span>· live record</span></h1>
+  <div class="spacer"></div>
+  <span class="dot" id="dot" title="feed"></span>
+  <input id="key" type="password" placeholder="caller key" autocomplete="off">
+  <button id="connect">Connect</button>
+</header>
+<main>
+  <nav id="nav"><div class="empty">Connect with a caller key to see the record.</div></nav>
+  <section id="view">
+    <div class="hint">
+      <p>Every call that passes through the gateway appears here as it streams: its session on the left, its blocks in the middle, opening, growing and closing in real time.</p>
+      <p>Point an SDK at this address with a caller key and an <code>X-Session</code> header, send a call with <code>stream: true</code>, and watch.</p>
+    </div>
+  </section>
+</main>
+<script>
+(() => {
+  // ── state: the record as this page knows it ───────────────────────────────
+  const sessions = new Map();        // id -> {session, key, started, ended, streams: Map(id -> stream)}
+  let selected = null, source = null;
+  const $ = (id) => document.getElementById(id);
+  const nav = $("nav"), view = $("view"), dot = $("dot"), keyInput = $("key");
+  const esc = (s) => String(s ?? "").replace(/[&<>"]/g, (c) => ({"&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;"}[c]));
+  const key = () => keyInput.value.trim();
+  const api = (path) => fetch(path, {headers: {"x-api-key": key()}}).then((r) => r.ok ? r.json() : Promise.reject(r.status));
+  const clock = (iso) => iso ? new Date(iso).toLocaleTimeString([], {hour12: false}) + "." + String(new Date(iso).getMilliseconds()).padStart(3, "0") : "…";
+  const span = (a, b) => a && b ? ((new Date(b) - new Date(a)) / 1000).toFixed(2) + "s" : "";
+
+  // ── the sidebar: callers, their sessions ──────────────────────────────────
+  function session(id, key, started) {
+    let s = sessions.get(id);
+    if (!s) { s = {session: id, key, started, ended: null, count: 0, streams: new Map()}; sessions.set(id, s); }
+    return s;
+  }
+  function drawNav() {
+    if (!sessions.size) { nav.innerHTML = '<div class="empty">No calls yet. The first one will appear here as it streams.</div>'; return; }
+    const byCaller = new Map();
+    for (const s of sessions.values()) (byCaller.get(s.key) || byCaller.set(s.key, []).get(s.key)).push(s);
+    let html = "<h2>callers</h2>";
+    for (const [caller, list] of byCaller) {
+      list.sort((a, b) => (b.started || "").localeCompare(a.started || ""));
+      html += `<div class="caller">${esc(caller)}<small>${list.length} session${list.length === 1 ? "" : "s"}</small></div>`;
+      for (const s of list) {
+        const running = s.streams.size ? [...s.streams.values()].some((st) => !st.ended) : !s.ended;
+        html += `<div class="session${s.session === selected ? " selected" : ""}" data-id="${esc(s.session)}">
+          <span class="dot${running ? " on" : ""}"></span><span class="name">${esc(s.session)}</span><span class="count">${s.count}</span></div>`;
+      }
+    }
+    nav.innerHTML = html;
+  }
+  nav.addEventListener("click", (e) => { const el = e.target.closest(".session"); if (el) select(el.dataset.id); });
+
+  // ── the main pane: one session's streams, block by block ──────────────────
+  async function select(id) {
+    selected = id;
+    drawNav();
+    try {
+      const snap = await api(`/v1/sessions/${encodeURIComponent(id)}`);
+      const s = session(id, snap.key, snap.started);
+      s.streams = new Map(snap.streams.map((st) => [st.id, st]));
+      s.count = s.streams.size;
+      s.ended = snap.ended;
+    } catch (e) { /* a session only seen live is drawn from what we have */ }
+    drawSession();
+  }
+  function lastAsk(request) {
+    const m = (request?.messages || []).filter((x) => x.role === "user").pop();
+    if (!m) return request?.prompt || "";
+    if (typeof m.content === "string") return m.content;
+    return (m.content || []).map((c) => c.type === "text" ? c.text : c.type === "tool_result" ? `[tool_result ${c.tool_use_id || ""}]` : c.text || `[${c.type}]`).join(" ");
+  }
+  function bodyOf(b) {
+    if (b.type === "tool_use") return `${b.name || ""}(${typeof b.input === "string" ? b.input : b.input ? JSON.stringify(b.input, null, 1) : ""})`;
+    if (b.type === "tool_call") return `${b.name || ""}(${b.arguments || ""})`;
+    return b.thinking ?? b.reasoning ?? b.text ?? b.content ?? "";
+  }
+  function drawBlock(b) {
+    return `<div class="block ${esc(b.type)}${b.ended ? "" : " open"}" data-index="${b.index}">
+      <div class="kind">${esc(b.type)}<small>${clock(b.started)}</small><small>${b.ended ? span(b.started, b.ended) : "…"}</small></div>
+      <div class="body">${esc(bodyOf(b))}</div></div>`;
+  }
+  function drawFoot(st) {
+    const u = st.usage || {};
+    const tokens = u.input_tokens != null ? `${u.input_tokens} in · ${u.output_tokens} out` : u.prompt_tokens != null ? `${u.prompt_tokens} in · ${u.completion_tokens} out` : "";
+    const parts = [st.ended ? `ended ${clock(st.ended)}` : "streaming", span(st.started, st.ended),
+                   st.stop_reason ? `stop ${st.stop_reason}` : "", st.finish_reason ? `finish ${st.finish_reason}` : "", tokens];
+    if (st.error) parts.push(`<span class="error">${esc(st.error)}</span>`);
+    return parts.filter(Boolean).join("<span>·</span>");
+  }
+  function drawStream(st) {
+    return `<article class="stream${st.ended ? "" : " running"}" id="st-${esc(st.id)}">
+      <div class="head"><span class="model">${esc(st.model)}</span><span class="badge">${esc(st.format)}</span>
+        ${st.ended ? "" : '<span class="badge live">live</span>'}<span class="id">${esc(st.id)}</span><span class="when">${clock(st.started)}</span></div>
+      <div class="ask"><b>user</b>${esc(lastAsk(st.request))}</div>
+      <div class="blocks">${(st.blocks || []).map(drawBlock).join("")}</div>
+      <div class="foot">${drawFoot(st)}</div></article>`;
+  }
+  function title(s) {
+    return `<h2>${esc(s.session)}</h2><small>caller ${esc(s.key)} · ${s.count} stream${s.count === 1 ? "" : "s"}</small>`;
+  }
+  function drawTitle(s) { const t = view.querySelector(".title"); if (t) t.innerHTML = title(s); }
+  function drawSession() {
+    const s = sessions.get(selected);
+    if (!s) { view.innerHTML = ""; return; }
+    const streams = [...s.streams.values()].sort((a, b) => a.started.localeCompare(b.started));
+    view.innerHTML = `<div class="title">${title(s)}</div>` + streams.map(drawStream).join("");
+    view.scrollTop = view.scrollHeight;
+  }
+  const el = (st, sel) => document.querySelector(`#st-${CSS.escape(st.id)} ${sel}`);
+
+  // ── the live feed: the record's own events, applied as they arrive ────────
+  const handlers = {
+    "stream.started"(e) {
+      const s = session(e.session, e.key, e.snapshot.started);
+      const st = {...e.snapshot, blocks: []};
+      s.streams.set(st.id, st);
+      s.count += 1;
+      s.ended = null;
+      if (!selected) { select(e.session); return; }
+      if (e.session === selected) { drawTitle(s); view.insertAdjacentHTML("beforeend", drawStream(st)); view.scrollTop = view.scrollHeight; }
+    },
+    "stream.message"(e, st) { Object.assign(st.message ||= {}, e.message); },
+    "block.started"(e, st) {
+      st.blocks.push(e.block);
+      if (e.session === selected) { const box = el(st, ".blocks"); if (box) box.insertAdjacentHTML("beforeend", drawBlock(e.block)); view.scrollTop = view.scrollHeight; }
+    },
+    "block.delta"(e, st) {
+      const b = st.blocks[e.index]; if (!b) return;
+      b[e.field] = (b[e.field] || "") + e.delta;
+      if (e.session === selected && e.field !== "signature") { const body = el(st, `.block[data-index="${e.index}"] .body`); if (body) body.textContent = bodyOf(b); }
+    },
+    "block.ended"(e, st) {
+      st.blocks[e.block.index] = e.block;
+      if (e.session === selected) { const node = el(st, `.block[data-index="${e.block.index}"]`); if (node) node.outerHTML = drawBlock(e.block); }
+    },
+    "stream.ended"(e, st) {
+      Object.assign(st, e.snapshot, {blocks: st.blocks, request: st.request});
+      const s = sessions.get(e.session);
+      if (s && [...s.streams.values()].every((x) => x.ended)) s.ended = st.ended;
+      if (e.session === selected) { const node = document.getElementById(`st-${st.id}`); if (node) node.outerHTML = drawStream(st); }
+      drawNav();
+    },
+  };
+  function apply(e) {
+    const s = sessions.get(e.session);
+    const st = s?.streams.get(e.stream);
+    if (e.type !== "stream.started" && !st) return;      // a stream that began before we were watching: the snapshot has it
+    handlers[e.type]?.(e, st);
+    if (e.type === "stream.started") drawNav();
+  }
+
+  async function connect() {
+    if (source) source.close();
+    try { localStorage.setItem("mi-key", key()); } catch (_) {}
+    dot.className = "dot";
+    try {
+      const list = await api("/v1/sessions");
+      sessions.clear();
+      for (const s of list.data) Object.assign(session(s.session, s.key, s.started), {ended: s.ended, count: s.streams});
+    } catch (status) { dot.className = "dot off"; nav.innerHTML = `<div class="empty">${status === 401 ? "Unknown key." : "Could not reach the gateway."}</div>`; return; }
+    drawNav();
+    source = new EventSource(`/v1/live?key=${encodeURIComponent(key())}`);
+    source.onopen = () => { dot.className = "dot on"; };
+    source.onerror = () => { dot.className = "dot off"; };
+    for (const type of Object.keys(handlers)) source.addEventListener(type, (ev) => apply(JSON.parse(ev.data)));
+    if (selected && sessions.has(selected)) select(selected); else if (sessions.size) select([...sessions.keys()][0]);
+  }
+  $("connect").onclick = connect;
+  keyInput.addEventListener("keydown", (e) => { if (e.key === "Enter") connect(); });
+  try { keyInput.value = localStorage.getItem("mi-key") || ""; } catch (_) {}
+  if (keyInput.value) connect();
+})();
+</script>
+</body>
+</html>
