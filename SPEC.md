@@ -69,7 +69,7 @@ Every level has an id, a start and an end.
 
 **Session.** `agent`, `session`, `started` at its first stream, `ended` when its last stream ended, `streams`, `interrupted`, `killswitch`.
 
-**Stream.** `id`, `agent`, `session`, `provider`, `model`, `format`, `started` when the request arrived, `ended` when the last line passed or the connection was lost, `request` exactly as received, `message` (the response's id, model and role, from its first line), `blocks[]`, `stop_reason`, `usage`, `interrupted` (`null`, or `by` the level that cut it, `at` when, and the `block` it landed in), `error`. For Chat Completions also `finish_reason`, the format's own word.
+**Stream.** One connection to the provider: `started` when it opened, `ended` when it closed. `request` exactly as received. The response as it streamed: `message` (its id, model and role, from the first line), `blocks[]`, the reason it ended under the format's own word (`stop_reason` in Messages, `finish_reason` in Chat Completions), and `usage` with the provider's own names. Then the gateway's own fields: `id`, `agent`, `session`, `provider`, `model`, `format`, `interrupted` (`null`, or `by` the level that cut it, `at` when, and the `block` it landed in), `error`. A cut stream's reason is `interrupted`.
 
 **Block.** `index`, `type`, `started` when it opened, `ended` when it closed, and its content under the format's own field names:
 

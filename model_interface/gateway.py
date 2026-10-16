@@ -40,9 +40,8 @@ class Stream:
     ended: float | None = None
     message: dict = field(default_factory=dict)    # the response's id, model and role, from its first line
     blocks: list = field(default_factory=list)
-    stop_reason: str | None = None
-    finish_reason: str | None = None       # Chat Completions' own word for it, when that is the format
-    usage: dict = field(default_factory=dict)
+    stop: str | None = None                # why the response ended, in the format's own vocabulary
+    usage: dict = field(default_factory=dict)   # as the provider names it
     interrupted: dict | None = None        # {"by": level, "at": when, "block": {index, type} or None} once cut
     error: str | None = None
 
@@ -54,9 +53,7 @@ class Stream:
             out["request"] = self.request
         if blocks:
             out["blocks"] = [stamped(b) for b in self.blocks]
-        out.update({"stop_reason": self.stop_reason, "usage": self.usage, "interrupted": self.interrupted, "error": self.error})
-        if self.finish_reason:
-            out["finish_reason"] = self.finish_reason
+        out.update({self.model.format.stop_field: self.stop, "usage": self.usage, "interrupted": self.interrupted, "error": self.error})
         return out
 
 

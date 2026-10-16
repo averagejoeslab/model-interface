@@ -70,8 +70,9 @@ class Reading:
         """Anything to settle once a block is whole, such as parsing its input."""
 
     def stop(self, reason, usage=None):
+        """The stream's end as the provider stated it: the reason, under the format's own word, and usage as the provider names it."""
         self.close_block()
-        self.stream.stop_reason = reason
+        self.stream.stop = reason
         if usage:
             self.stream.usage.update(usage)
 
@@ -80,6 +81,7 @@ class Format(ABC):
     name: str
     endpoint: str              # the path on this gateway
     path: str                  # what the SDK appends to its base_url; the provider's endpoint ends with it
+    stop_field: str            # the format's own word for why a response ended
 
     @abstractmethod
     def client(self, url: str, key: str): ...
@@ -161,7 +163,7 @@ class AnthropicReading(Reading):
 
 
 class AnthropicFormat(Format):
-    name, endpoint, path = "anthropic", "/v1/messages", "/v1/messages"
+    name, endpoint, path, stop_field = "anthropic", "/v1/messages", "/v1/messages", "stop_reason"
 
     def client(self, url, key):
         return anthropic.Anthropic(base_url=url, api_key=key or "none", timeout=600)
@@ -198,8 +200,6 @@ class AnthropicFormat(Format):
 class OpenAIReading(Reading):
     """Blocks are inferred: a run of content, of reasoning, or of one tool call's arguments."""
 
-    STOP = {"tool_calls": "tool_use", "length": "max_tokens", "stop": "end_turn"}
-
     def __init__(self, stream, listener):
         super().__init__(stream, listener)
         self.calls = {}                  # the provider's tool call index -> our block
@@ -208,7 +208,7 @@ class OpenAIReading(Reading):
         if not self.stream.message and (c.get("id") or c.get("model")):
             self.start(id=c.get("id"), model=c.get("model"), role="assistant")
         if c.get("usage"):
-            self.stream.usage.update({"input_tokens": c["usage"].get("prompt_tokens", 0), "output_tokens": c["usage"].get("completion_tokens", 0)})
+            self.stream.usage.update(c["usage"])
         for choice in c.get("choices") or []:
             delta = choice.get("delta") or {}
             if delta.get("reasoning_content"):
@@ -228,12 +228,11 @@ class OpenAIReading(Reading):
                 block["name"] = block["name"] or call.get("function", {}).get("name")
                 self.grow("arguments", call.get("function", {}).get("arguments") or "")
             if choice.get("finish_reason"):
-                self.stop(self.STOP.get(choice["finish_reason"], choice["finish_reason"]))
-                self.stream.finish_reason = choice["finish_reason"]
+                self.stop(choice["finish_reason"])
 
 
 class OpenAIFormat(Format):
-    name, endpoint, path = "openai", "/v1/chat/completions", "/chat/completions"
+    name, endpoint, path, stop_field = "openai", "/v1/chat/completions", "/chat/completions", "finish_reason"
 
     def client(self, url, key):
         return openai.OpenAI(base_url=url, api_key=key or "none", timeout=600)

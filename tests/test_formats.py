@@ -42,7 +42,7 @@ def test_an_anthropic_reading_builds_blocks_with_times_as_the_lines_arrive():
     r.feed('data: {"type": "content_block_stop", "index": 2}')
     r.feed('data: {"type": "message_delta", "delta": {"stop_reason": "tool_use"}, "usage": {"output_tokens": 5}}')
     assert stream.blocks[2]["input"] == {"cmd": "ls"} and stream.blocks[2]["ended"] is not None and r.open is None
-    assert stream.stop_reason == "tool_use" and stream.usage == {"input_tokens": 3, "output_tokens": 5}
+    assert stream.stop == "tool_use" and stream.usage == {"input_tokens": 3, "output_tokens": 5}
     assert told[:4] == ["stream.message", "block.started", "block.delta", "block.delta"] and told.count("block.ended") == 3
 
 
@@ -60,8 +60,10 @@ def test_an_openai_reading_infers_the_same_blocks_from_chunks():
     assert stream.message == {"id": "c1", "model": "g", "role": "assistant"}
     assert [(b["type"], b.get("reasoning") or b.get("content") or b.get("arguments")) for b in stream.blocks] == [("reasoning", "Think first."), ("content", "Hi"), ("tool_call", '{"cmd": "ls"}')]
     assert stream.blocks[2]["id"] == "call_1" and stream.blocks[2]["name"] == "shell" and stream.blocks[2]["call_index"] == 0
-    assert all(b["ended"] is not None for b in stream.blocks) and stream.stop_reason == "tool_use" and stream.finish_reason == "tool_calls"
-    assert stream.usage == {"input_tokens": 3, "output_tokens": 5}
+    assert all(b["ended"] is not None for b in stream.blocks) and stream.stop == "tool_calls"
+    assert stream.usage == {"prompt_tokens": 3, "completion_tokens": 5}, "usage keeps the provider's own names"
+    snap = stream.snapshot()
+    assert snap["finish_reason"] == "tool_calls" and "stop_reason" not in snap, "the record uses the format's own word, and only that one"
     assert told.count("block.started") == 3 and told.count("block.ended") == 3
 
 

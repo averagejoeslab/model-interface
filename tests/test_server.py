@@ -148,7 +148,8 @@ def test_an_openai_stream_is_recorded_in_the_same_shape_with_its_own_block_types
     assert [b["type"] for b in st["blocks"]] == ["reasoning", "content", "tool_call"]
     assert st["blocks"][0]["reasoning"] == "Where am I?" and st["blocks"][1]["content"] == "Hello there, friend."
     assert st["blocks"][2]["name"] == "shell" and json.loads(st["blocks"][2]["arguments"]) == {"cmd": "pwd"} and st["blocks"][2]["call_index"] == 0
-    assert all(b["started"] <= b["ended"] for b in st["blocks"]) and st["stop_reason"] == "tool_use" and st["finish_reason"] == "tool_calls"
+    assert all(b["started"] <= b["ended"] for b in st["blocks"]) and st["finish_reason"] == "tool_calls" and "stop_reason" not in st
+    assert st["usage"] == {"prompt_tokens": 10, "completion_tokens": 7, "total_tokens": 17}
 
 
 def test_an_agent_sees_only_its_own_record_and_the_operator_sees_all(server, provider):
@@ -233,7 +234,8 @@ def test_the_agent_killswitch_cuts_every_session_of_that_agent_and_no_other_agen
     stream, seen = read_stream(server, "/v1/chat/completions", openai_body(), "a-one", after=(5, lambda _: flip(True)))
     last = json.loads(seen[-2])
     assert seen[-1] == "[DONE]" and last["interrupted"] is True and hung_up(provider)
-    assert httpx.get(f"{server}/v1/streams/{stream}", headers=ADMIN).json()["interrupted"]["by"] == "agent"
+    rec = httpx.get(f"{server}/v1/streams/{stream}", headers=ADMIN).json()
+    assert rec["interrupted"]["by"] == "agent" and rec["finish_reason"] == "interrupted"
     assert httpx.post(f"{server}/v1/messages", headers={**H, "X-Session": "a-two"}, json=anthropic_body()).json()["error"]["level"] == "agent"
     assert httpx.post(f"{server}/v1/chat/completions", headers={"x-api-key": "helper-key"}, json=openai_body()).status_code == 200, "helper runs"
     switches = {a["agent"]: a["killswitch"] for a in httpx.get(f"{server}/v1/agents", headers=ADMIN).json()["data"]}

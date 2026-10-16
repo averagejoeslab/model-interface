@@ -230,7 +230,7 @@
     const u = st.usage || {};
     const tokens = u.input_tokens != null ? `${u.input_tokens} in · ${u.output_tokens} out` : u.prompt_tokens != null ? `${u.prompt_tokens} in · ${u.completion_tokens} out` : "";
     const parts = [st.ended ? `ended ${clock(st.ended)}` : "streaming", span(st.started, st.ended),
-                   st.stop_reason ? `stop ${st.stop_reason}` : "", st.finish_reason ? `finish ${st.finish_reason}` : "", tokens];
+                   st.stop_reason ? `stop_reason ${st.stop_reason}` : st.finish_reason ? `finish_reason ${st.finish_reason}` : "", tokens];
     if (st.interrupted) parts.push(`<span class="cut">cut by the ${esc(st.interrupted.by)} killswitch at ${clock(st.interrupted.at)}</span>`);
     if (st.error) parts.push(`<span class="error">${esc(st.error)}</span>`);
     return parts.filter(Boolean).join("<span>·</span>");
@@ -265,7 +265,7 @@
       const lastStream = i === streams.length - 1;
       const g1 = `<span class="guide">      ${lastStream ? "└─" : "├─"}</span>`, g2 = `<span class="guide">      ${lastStream ? "  " : "│ "}</span>`;
       const status = st.interrupted ? `<span class="cutmark">interrupted · cut by the ${esc(st.interrupted.by)} switch at ${clock(st.interrupted.at)}</span>`
-                   : st.ended ? `<span class="level">${st.stop_reason ? "stop " + esc(st.stop_reason) : ""}${st.error ? " · error" : ""}</span>` : `<span class="running">streaming</span>`;
+                   : st.ended ? `<span class="level">${esc(st.stop_reason || st.finish_reason || "")}${st.error ? " · error" : ""}</span>` : `<span class="running">streaming</span>`;
       lines.push(`${g1} <span class="node">${esc(st.id)}</span>  <span class="level">stream · ${esc(st.model)} · ${esc(st.provider)}</span>  ${when(st.started, st.ended)}  ${status}`);
       const blocks = st.blocks || [];
       blocks.forEach((b, j) => {
