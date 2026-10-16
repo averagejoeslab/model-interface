@@ -261,13 +261,16 @@ class AnthropicFormat(Format):
 
 # ── OpenAI Chat Completions ──────────────────────────────────────────────────
 #
-# The envelope: every chunk's top-level fields restate the head. Each choices[i].delta grows choices[i].message,
+# The envelope: every chunk's top-level fields restate the head, except the padding some providers add to every
+# chunk to defeat buffering. Each choices[i].delta grows choices[i].message,
 # and every key in it grows a piece at that key, one per index for a list of indexed objects. The other fields of
 # a choice are set. Pieces are the deltas as they came; the message is the same deltas merged.
 
 class OpenAIReading(Reading):
+    PADDING = ("obfuscation",)       # random text on every chunk to defeat proxy buffering: the envelope, not the response
+
     def take(self, c):
-        self.head({k: v for k, v in c.items() if k != "choices"})
+        self.head({k: v for k, v in c.items() if k != "choices" and k not in self.PADDING})
         for choice in c.get("choices") or []:
             i = choice.get("index", 0)
             choices = self.stream.response.setdefault("choices", [])
@@ -308,7 +311,7 @@ class OpenAIFormat(Format):
         return OpenAIReading(stream, listener)
 
     def response(self, stream):
-        r = {k: v for k, v in stream.response.items() if k not in ("obfuscation", self.stop_field)}
+        r = {k: v for k, v in stream.response.items() if k != self.stop_field}
         r["object"] = "chat.completion"
         return {**r, "blocks": [dict(b) for b in stream.blocks]}
 

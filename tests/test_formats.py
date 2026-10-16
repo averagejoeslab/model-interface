@@ -134,6 +134,9 @@ def test_a_chat_stream_becomes_pieces_at_their_place_in_the_message_with_times()
     assert stream.response["choices"][0]["finish_reason"] == "tool_calls" and stream.response["service_tier"] == "default"
     assert stream.response["usage"]["completion_tokens_details"]["reasoning_tokens"] == 0
     assert [p["at"] for k, p in told if k == "block.started"] == [b["at"] for b in stream.blocks]
+    heads = [p["response"] for k, p in told if k == "stream.response"]
+    assert len(heads) == 2 and "usage" in heads[1] and not any("obfuscation" in h for h in heads), "the head is told once, then only when it changes: here the usage at the end; padding is never news"
+    assert "obfuscation" not in stream.response
 
 
 # ── things no reading has seen before ─────────────────────────────────────────
