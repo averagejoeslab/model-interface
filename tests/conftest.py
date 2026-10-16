@@ -10,9 +10,9 @@ from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse, StreamingResponse
 
 from model_interface.config import Config
-from model_interface.formats import FORMATS
 from model_interface.gateway import Gateway, Record
-from model_interface.providers import Model, Provider
+from model_interface.killswitch import Killswitch
+from model_interface.providers import Agent, Provider
 from model_interface.server import create_app
 
 
@@ -123,16 +123,18 @@ def provider(fake):
 
 @pytest.fixture
 def config(provider):
-    anthropic = Provider("fake-anthropic", FORMATS["anthropic"], provider.url, "")
-    openai = Provider("fake-openai", FORMATS["openai"], provider.url + "/v1", "")
-    return Config(models={"coder": Model("coder", anthropic, "fake-sonnet"), "gpt": Model("gpt", openai, "fake-gpt"),
-                          "broken": Model("broken", anthropic, "bad"), "broken-gpt": Model("broken-gpt", openai, "bad")},
-                  keys={"mi-test-key": "team-test"}, record=None)
+    """Two providers, one per format, on the fake; one agent that may use both; a second agent that may use one model."""
+    anthropic = Provider("fake-anthropic", provider.url + "/v1/messages", "", ["fake-sonnet", "bad"])
+    openai = Provider("fake-openai", provider.url + "/v1/chat/completions", "", ["fake-gpt", "bad"])
+    coder = Agent("coder", ["mi-test-key"], anthropic.models + openai.models)
+    helper = Agent("helper", ["helper-key"], [openai.model("fake-gpt")])
+    return Config(providers={"fake-anthropic": anthropic, "fake-openai": openai}, agents={"coder": coder, "helper": helper},
+                  admin="admin-key", record=None)
 
 
 @pytest.fixture
 def gateway(config):
-    return Gateway(config.models, Record(None))
+    return Gateway(Record(None), Killswitch())
 
 
 @pytest.fixture

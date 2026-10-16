@@ -6,6 +6,7 @@ into the record's blocks as they arrive. It never changes what goes over the wir
 import inspect
 import json
 import time
+import uuid
 from abc import ABC, abstractmethod
 
 import anthropic
@@ -77,7 +78,8 @@ class Reading:
 
 class Format(ABC):
     name: str
-    endpoint: str              # the path, on this gateway and on the provider
+    endpoint: str              # the path on this gateway
+    path: str                  # what the SDK appends to its base_url; the provider's endpoint ends with it
 
     @abstractmethod
     def client(self, url: str, key: str): ...
@@ -89,11 +91,22 @@ class Format(ABC):
     @abstractmethod
     def reading(self, stream, listener) -> Reading: ...
 
+    @abstractmethod
+    def closing(self, reading: Reading) -> list[str]:
+        """The stream text that ends a cut stream so the caller's SDK sees a whole message."""
+
+    @abstractmethod
+    def error_line(self, message: str) -> str:
+        """One stream line carrying a failure that happened after lines were already sent."""
+
     @staticmethod
     def status_of(error):
         """A provider's refusal: (status, body), or None if the error isn't one."""
         if isinstance(error, (anthropic.APIStatusError, openai.APIStatusError)):
-            return error.status_code, error.body if isinstance(error.body, dict) else {"error": str(error.body or error)}
+            body = error.body if isinstance(error.body, dict) else {"error": str(error.body or error)}
+            if isinstance(error, openai.APIStatusError) and "error" not in body:
+                body = {"error": body}                 # the OpenAI SDK unwraps the error object; the wire carries it wrapped
+            return error.status_code, body
         return None
 
     @staticmethod
@@ -148,7 +161,7 @@ class AnthropicReading(Reading):
 
 
 class AnthropicFormat(Format):
-    name, endpoint = "anthropic", "/v1/messages"
+    name, endpoint, path = "anthropic", "/v1/messages", "/v1/messages"
 
     def client(self, url, key):
         return anthropic.Anthropic(base_url=url, api_key=key or "none", timeout=600)
@@ -160,6 +173,24 @@ class AnthropicFormat(Format):
 
     def reading(self, stream, listener):
         return AnthropicReading(stream, listener)
+
+    def closing(self, reading):
+        def sse(e):
+            return f"event: {e['type']}\ndata: {json.dumps(e)}\n\n"
+        out = []
+        if not reading.stream.message:
+            out.append(sse({"type": "message_start", "message": {"id": f"msg_{uuid.uuid4().hex[:12]}", "type": "message", "role": "assistant",
+                                                                 "model": "", "content": [], "stop_reason": None, "stop_sequence": None,
+                                                                 "usage": {"input_tokens": 0, "output_tokens": 0}}}))
+        if reading.open is not None:
+            out.append(sse({"type": "content_block_stop", "index": reading.open["index"]}))
+        out.append(sse({"type": "message_delta", "delta": {"stop_reason": "interrupted", "stop_sequence": None},
+                        "usage": {"output_tokens": reading.stream.usage.get("output_tokens", 0)}}))
+        out.append(sse({"type": "message_stop"}))
+        return out
+
+    def error_line(self, message):
+        return f"event: error\ndata: {json.dumps({'type': 'error', 'error': {'type': 'upstream_error', 'message': message}})}\n\n"
 
 
 # ── OpenAI Chat Completions ──────────────────────────────────────────────────
@@ -202,7 +233,7 @@ class OpenAIReading(Reading):
 
 
 class OpenAIFormat(Format):
-    name, endpoint = "openai", "/v1/chat/completions"
+    name, endpoint, path = "openai", "/v1/chat/completions", "/chat/completions"
 
     def client(self, url, key):
         return openai.OpenAI(base_url=url, api_key=key or "none", timeout=600)
@@ -213,6 +244,15 @@ class OpenAIFormat(Format):
 
     def reading(self, stream, listener):
         return OpenAIReading(stream, listener)
+
+    def closing(self, reading):
+        chunk = {"id": reading.stream.message.get("id") or f"chatcmpl-{uuid.uuid4().hex[:12]}", "object": "chat.completion.chunk",
+                 "created": int(time.time()), "model": reading.stream.message.get("model") or "", "interrupted": True,
+                 "choices": [{"index": 0, "delta": {}, "finish_reason": "stop"}]}
+        return [f"data: {json.dumps(chunk)}\n\n", "data: [DONE]\n\n"]
+
+    def error_line(self, message):
+        return f"data: {json.dumps({'error': {'type': 'upstream_error', 'message': message}})}\n\n"
 
 
 FORMATS = {"anthropic": AnthropicFormat(), "openai": OpenAIFormat()}

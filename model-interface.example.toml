@@ -1,30 +1,43 @@
 # Copy to model-interface.toml. Values written as "env:NAME" are read from the environment.
 
+admin = "env:MI_ADMIN_KEY"             # the operator: reads every agent's record, holds the killswitches, opens the page
 record = "~/.model-interface/streams.jsonl"  # one line per finished stream: request, blocks, timings
 
-[keys]                                 # what callers present, by name; never a provider's key
-team-a = "env:MI_KEY"
+# A provider is an endpoint and a key. The endpoint's path says which format it speaks, and so which
+# SDK reaches it: .../v1/messages is Messages (the anthropic SDK), .../chat/completions is Chat
+# Completions (the openai SDK). Models are the provider's own names.
 
-[providers.anthropic]                  # reached with the Anthropic SDK; serves /v1/messages
-format = "anthropic"
-url = "https://api.anthropic.com"
+[providers.anthropic]
+endpoint = "https://api.anthropic.com/v1/messages"
 key = "env:ANTHROPIC_API_KEY"
+models = ["claude-sonnet-5-5", "claude-haiku-5-5"]
 
-[providers.openai]                     # reached with the OpenAI SDK; serves /v1/chat/completions
-format = "openai"
-url = "https://api.openai.com/v1"
+[providers.openai]
+endpoint = "https://api.openai.com/v1/chat/completions"
 key = "env:OPENAI_API_KEY"
+models = ["gpt-5"]
 
-[providers.ollama]                     # local, in Messages format; no key
-format = "anthropic"
-url = "http://localhost:11434"
+[providers.deepseek]                   # DeepSeek serves Messages too; the same provider in the other format is a second entry
+endpoint = "https://api.deepseek.com/anthropic/v1/messages"
+key = "env:DEEPSEEK_API_KEY"
+models = ["deepseek-chat"]
 
-[providers.ollama-openai]              # the same local model, in Chat Completions format
-format = "openai"
-url = "http://localhost:11434/v1"
+[providers.ollama]                     # local, no key, in Messages format
+endpoint = "http://localhost:11434/v1/messages"
+models = ["qwen2.5:3b"]
 
-[models]                               # the aliases callers use; each speaks its provider's format
-coder = { provider = "anthropic", model = "claude-sonnet-5-5" }
-gpt = { provider = "openai", model = "gpt-5" }
-local = { provider = "ollama", model = "qwen2.5:3b" }
-local-openai = { provider = "ollama-openai", model = "qwen2.5:3b" }
+[providers.ollama-openai]              # the same local models, in Chat Completions format
+endpoint = "http://localhost:11434/v1/chat/completions"
+models = ["qwen2.5:3b"]
+
+# An agent is a name, its keys, and the models it may use, as provider/model. A call names the model
+# directly, as the provider names it; the agent's grants say which provider that is. One model name
+# resolves to one provider per format for an agent.
+
+[agents.coder]
+keys = ["env:CODER_KEY"]
+models = ["anthropic/claude-sonnet-5-5", "deepseek/deepseek-chat", "ollama-openai/qwen2.5:3b"]
+
+[agents.local]
+keys = ["env:LOCAL_KEY"]
+models = ["ollama/qwen2.5:3b", "ollama-openai/qwen2.5:3b"]

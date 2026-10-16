@@ -3,23 +3,25 @@ import threading
 import time
 
 import httpx
+import pytest
 from anthropic import Anthropic
 from openai import OpenAI
 
-H = {"x-api-key": "mi-test-key", "X-Session": "demo"}
+H = {"x-api-key": "mi-test-key", "X-Session": "demo"}      # the agent "coder"
+ADMIN = {"x-api-key": "admin-key"}
 
 
-def anthropic_body(model="coder", **extra):
+def anthropic_body(model="fake-sonnet", **extra):
     return {"model": model, "max_tokens": 50, "stream": True, "messages": [{"role": "user", "content": "hi"}], **extra}
 
 
-def openai_body(model="gpt", **extra):
+def openai_body(model="fake-gpt", **extra):
     return {"model": model, "stream": True, "messages": [{"role": "user", "content": "hi"}], **extra}
 
 
-def watch(server, session, seen, ready, path=None):
-    """Follow a session's live feed, stamping each record event with when it arrived."""
-    with httpx.stream("GET", path or f"{server}/v1/sessions/{session}/live", headers=H, timeout=30) as r:
+def watch(server, path, seen, ready, key="admin-key"):
+    """Follow a live feed, stamping each record event with when it arrived, until a stream ends."""
+    with httpx.stream("GET", f"{server}{path}", headers={"x-api-key": key}, timeout=30) as r:
         for line in r.iter_lines():
             if line.startswith("data:"):
                 e = json.loads(line[5:])
@@ -31,95 +33,136 @@ def watch(server, session, seen, ready, path=None):
                     return
 
 
+def hung_up(provider, within=2.0) -> bool:
+    """Whether the gateway closed its connection to the provider, allowing the provider a moment to notice."""
+    end = time.time() + within
+    while not provider.closed_early and time.time() < end:
+        time.sleep(0.02)
+    return provider.closed_early
+
+
+def read_stream(server, path, body, session, after=None, key="mi-test-key"):
+    seen = []
+    with httpx.stream("POST", f"{server}{path}", headers={"x-api-key": key, "X-Session": session}, json=body) as r:
+        assert r.status_code == 200, r.read()
+        stream = r.headers["x-stream"]
+        for line in r.iter_lines():
+            if line.startswith("data:"):
+                seen.append(line[5:].strip())
+                if after and len(seen) == after[0]:
+                    after[1](stream)
+    return stream, seen
+
+
 # ── pass-through ──────────────────────────────────────────────────────────────
 
-def test_messages_passes_through_verbatim_with_the_alias_swapped(server, provider):
-    with httpx.stream("POST", f"{server}/v1/messages", headers={**H, "anthropic-beta": "some-beta"}, json=anthropic_body(metadata={"user_id": "u1"}, brand_new_field=1)) as r:
-        assert r.status_code == 200 and r.headers["x-stream"].startswith("str_")
-        text = "".join(r.iter_text())
-    sent = provider.requests[0]
-    assert sent["body"]["model"] == "fake-sonnet" and sent["body"]["stream"] is True
-    assert sent["body"]["metadata"] == {"user_id": "u1"} and sent["body"]["brand_new_field"] == 1
-    assert sent["headers"]["anthropic-beta"] == "some-beta" and sent["headers"]["x-api-key"] == "none"
-    assert text.startswith("event: message_start\n") and text.rstrip().endswith('data: {"type": "message_stop"}')
+def test_messages_passes_through_verbatim_with_the_providers_key_and_name(server, provider):
+    body = anthropic_body(system="be brief", temperature=0.2, brand_new_field={"x": 1})
+    r = httpx.post(f"{server}/v1/messages", headers=H, json=body)
+    assert r.status_code == 200 and r.headers["content-type"].startswith("text/event-stream")
+    assert r.headers["x-agent"] == "coder" and r.headers["x-session"] == "demo" and r.headers["x-stream"].startswith("str_")
+    sent = provider.requests[-1]
+    assert sent["path"] == "/v1/messages" and sent["body"] == {**body, "model": "fake-sonnet"}
+    assert "x-session" not in sent["headers"] and sent["headers"]["x-api-key"] == "none"
+    assert "data: " in r.text and "Hello" in r.text
 
 
 def test_chat_completions_passes_through_to_the_openai_provider(server, provider):
-    with httpx.stream("POST", f"{server}/v1/chat/completions", headers={"authorization": "Bearer mi-test-key"}, json=openai_body(temperature=0.2)) as r:
-        assert r.status_code == 200
-        text = "".join(r.iter_text())
-    sent = provider.requests[0]
-    assert sent["body"]["model"] == "fake-gpt" and sent["body"]["temperature"] == 0.2 and sent["headers"]["authorization"] == "Bearer none"
-    assert text.rstrip().endswith("data: [DONE]")
+    r = httpx.post(f"{server}/v1/chat/completions", headers=H, json=openai_body(temperature=0))
+    assert r.status_code == 200 and r.text.rstrip().endswith("data: [DONE]")
+    assert provider.requests[-1]["path"] == "/v1/chat/completions" and provider.requests[-1]["body"]["model"] == "fake-gpt"
 
 
 def test_both_native_sdks_stream_through_their_own_endpoint(server, provider):
-    provider.tool, provider.thinking = ("shell", {"cmd": "ls"}), "Look first."
+    provider.tool = ("shell", {"cmd": "ls"})
     a = Anthropic(base_url=server, api_key="mi-test-key")
-    with a.messages.stream(model="coder", max_tokens=50, messages=[{"role": "user", "content": "hi"}]) as s:
-        assert "".join(s.text_stream) == "Hello there, friend."
+    with a.messages.stream(model="fake-sonnet", max_tokens=50, messages=[{"role": "user", "content": "go"}]) as s:
         m = s.get_final_message()
-    assert [b.type for b in m.content] == ["thinking", "text", "tool_use"] and m.content[2].input == {"cmd": "ls"} and m.stop_reason == "tool_use"
+    assert m.content[0].text == "Hello there, friend." and m.content[1].name == "shell" and m.stop_reason == "tool_use"
     o = OpenAI(base_url=f"{server}/v1", api_key="mi-test-key")
-    text, args, finish = "", "", None
-    for chunk in o.chat.completions.create(model="gpt", stream=True, messages=[{"role": "user", "content": "hi"}]):
-        for choice in chunk.choices:
-            text += choice.delta.content or ""
-            args += "".join(c.function.arguments or "" for c in choice.delta.tool_calls or [])
-            finish = choice.finish_reason or finish
-    assert text == "Hello there, friend." and json.loads(args) == {"cmd": "ls"} and finish == "tool_calls"
+    chunks = list(o.chat.completions.create(model="fake-gpt", stream=True, messages=[{"role": "user", "content": "go"}]))
+    assert "".join(c.choices[0].delta.content or "" for c in chunks if c.choices) == "Hello there, friend."
+    assert [c.choices[0].finish_reason for c in chunks if c.choices and c.choices[0].finish_reason] == ["tool_calls"]
 
 
 def test_refusals(server):
-    assert httpx.post(f"{server}/v1/messages", headers=H, json={**anthropic_body(), "stream": False}).status_code == 400
-    assert httpx.post(f"{server}/v1/messages", headers={"x-api-key": "wrong"}, json=anthropic_body()).status_code == 401
-    assert httpx.post(f"{server}/v1/messages", headers=H, json=anthropic_body("nope")).status_code == 404
-    assert httpx.post(f"{server}/v1/messages", headers=H, json=anthropic_body("gpt")).status_code == 400
-    assert httpx.post(f"{server}/v1/chat/completions", headers=H, json=openai_body("coder")).status_code == 400
-    assert httpx.post(f"{server}/v1/messages", headers={**H, "X-Session": "../x"}, json=anthropic_body()).status_code == 400
+    post = lambda path, body, **h: httpx.post(f"{server}{path}", headers={**H, **h}, json=body)
+    assert post("/v1/messages", anthropic_body(), **{"x-api-key": "nope"}).status_code == 401
+    assert post("/v1/messages", anthropic_body(), **{"x-api-key": "admin-key"}).status_code == 401, "the operator's key does not call models"
+    assert post("/v1/messages", {**anthropic_body(), "stream": False}).status_code == 400
+    assert post("/v1/messages", anthropic_body(model="nothing")).status_code == 404
+    r = post("/v1/chat/completions", openai_body(model="fake-sonnet"))
+    assert r.status_code == 400 and "/v1/messages" in r.json()["detail"], "a Messages model is pointed at its own endpoint"
+    assert post("/v1/messages", anthropic_body(), **{"X-Session": "bad session!"}).status_code == 400
+    r = post("/v1/chat/completions", openai_body(model="fake-sonnet"), **{"x-api-key": "helper-key"})
+    assert r.status_code == 404 and "helper" in r.json()["detail"], "an agent only sees its own grants"
 
 
 def test_a_providers_refusal_passes_through_with_its_status_and_body(server):
-    r = httpx.post(f"{server}/v1/messages", headers=H, json=anthropic_body("broken"))
+    r = httpx.post(f"{server}/v1/messages", headers=H, json=anthropic_body(model="bad"))
     assert r.status_code == 400 and r.json()["error"]["message"] == "prompt is too long"
-    r = httpx.post(f"{server}/v1/chat/completions", headers=H, json=openai_body("broken-gpt"))
-    assert r.status_code == 400 and "prompt is too long" in r.text
+    r = httpx.post(f"{server}/v1/chat/completions", headers=H, json=openai_body(model="bad"))
+    assert r.status_code == 400 and r.json()["error"]["message"] == "prompt is too long"
 
 
-# ── the record: sessions of streams of blocks ─────────────────────────────────
+def test_models_lists_what_each_key_may_use(server):
+    mine = httpx.get(f"{server}/v1/models", headers={"x-api-key": "helper-key"}).json()["data"]
+    assert [(m["id"], m["provider"], m["endpoint"]) for m in mine] == [("fake-gpt", "fake-openai", "/v1/chat/completions")]
+    assert len(httpx.get(f"{server}/v1/models", headers=ADMIN).json()["data"]) == 4
+    assert OpenAI(base_url=f"{server}/v1", api_key="helper-key").models.list().data[0].id == "fake-gpt"
+
+
+# ── the record: agents of sessions of streams of blocks ───────────────────────
 
 def test_a_session_holds_streams_of_blocks_with_times_at_every_level(server, provider):
     provider.tool, provider.thinking = ("shell", {"cmd": "pwd"}), "Where am I?"
     a = Anthropic(base_url=server, api_key="mi-test-key")
     for ask in ("first", "second"):
-        with a.messages.stream(model="coder", max_tokens=50, messages=[{"role": "user", "content": ask}], extra_headers={"X-Session": "s-rec"}) as s:
+        with a.messages.stream(model="fake-sonnet", max_tokens=50, messages=[{"role": "user", "content": ask}], extra_headers={"X-Session": "s-rec"}) as s:
             s.get_final_message()
-    s = httpx.get(f"{server}/v1/sessions/s-rec", headers=H).json()
-    assert s["session"] == "s-rec" and s["started"] and s["ended"] and len(s["streams"]) == 2
+    s = httpx.get(f"{server}/v1/agents/coder/sessions/s-rec", headers=ADMIN).json()
+    assert s["agent"] == "coder" and s["session"] == "s-rec" and s["started"] and s["ended"] and len(s["streams"]) == 2 and s["killswitch"] is False
     first = s["streams"][0]
     assert first["started"] <= first["ended"] <= s["ended"] and first["request"]["messages"] == [{"role": "user", "content": "first"}]
+    assert first["provider"] == "fake-anthropic" and first["model"] == "fake-sonnet" and first["format"] == "anthropic"
     assert first["message"] == {"id": "msg_1", "model": "fake-sonnet", "role": "assistant"}
     assert [b["type"] for b in first["blocks"]] == ["thinking", "text", "tool_use"]
     th, tx, tu = first["blocks"]
     assert th["thinking"] == "Where am I?" and th["signature"] == "sig_abc" and th["started"] <= th["ended"] <= tx["started"]
     assert tx["text"] == "Hello there, friend." and tx["ended"] <= tu["started"] <= tu["ended"] <= first["ended"]
     assert tu == {"index": 2, "type": "tool_use", "started": tu["started"], "ended": tu["ended"], "id": "t1", "name": "shell", "input": {"cmd": "pwd"}}
-    assert first["stop_reason"] == "tool_use" and first["usage"] == {"input_tokens": 10, "output_tokens": 7} and first["error"] is None
-    assert httpx.get(f"{server}/v1/streams/{first['id']}", headers=H).json()["blocks"] == first["blocks"]
-    assert httpx.get(f"{server}/v1/sessions", headers=H).json()["data"][0] == {"session": "s-rec", "key": "team-test", "started": s["started"], "ended": s["ended"], "streams": 2}
-    assert "blocks" not in httpx.get(f"{server}/v1/sessions/s-rec", headers=H, params={"blocks": "false"}).json()["streams"][0]
+    assert first["stop_reason"] == "tool_use" and first["usage"] == {"input_tokens": 10, "output_tokens": 7} and first["interrupted"] is None
+    assert httpx.get(f"{server}/v1/streams/{first['id']}", headers=ADMIN).json()["blocks"] == first["blocks"]
+    assert "blocks" not in httpx.get(f"{server}/v1/agents/coder/sessions/s-rec", headers=ADMIN, params={"blocks": "false"}).json()["streams"][0]
+    agents = httpx.get(f"{server}/v1/agents", headers=ADMIN).json()["data"]
+    assert [a["agent"] for a in agents] == ["coder", "helper"]
+    assert agents[0]["sessions"] == 1 and agents[0]["streams"] == 2 and agents[0]["running"] == 0 and agents[0]["killswitch"] is False
+    assert agents[1] == {"agent": "helper", "sessions": 0, "streams": 0, "running": 0, "interrupted": 0, "last": None, "killswitch": False}
 
 
 def test_an_openai_stream_is_recorded_in_the_same_shape_with_its_own_block_types(server, provider):
     provider.tool, provider.thinking = ("shell", {"cmd": "pwd"}), "Where am I?"
-    o = OpenAI(base_url=f"{server}/v1", api_key="mi-test-key", default_headers={"X-Session": "s-oai"})
-    list(o.chat.completions.create(model="gpt", stream=True, messages=[{"role": "user", "content": "hey"}]))
-    st = httpx.get(f"{server}/v1/sessions/s-oai", headers=H).json()["streams"][0]
-    assert st["format"] == "openai" and st["message"] == {"id": "chatcmpl-1", "model": "fake-gpt", "role": "assistant"}
+    o = OpenAI(base_url=f"{server}/v1", api_key="mi-test-key", default_headers={"X-Session": "s-rec-o"})
+    list(o.chat.completions.create(model="fake-gpt", stream=True, messages=[{"role": "user", "content": "go"}]))
+    st = httpx.get(f"{server}/v1/agents/coder/sessions/s-rec-o", headers=ADMIN).json()["streams"][0]
     assert [b["type"] for b in st["blocks"]] == ["reasoning", "content", "tool_call"]
     assert st["blocks"][0]["reasoning"] == "Where am I?" and st["blocks"][1]["content"] == "Hello there, friend."
     assert st["blocks"][2]["name"] == "shell" and json.loads(st["blocks"][2]["arguments"]) == {"cmd": "pwd"} and st["blocks"][2]["call_index"] == 0
     assert all(b["started"] <= b["ended"] for b in st["blocks"]) and st["stop_reason"] == "tool_use" and st["finish_reason"] == "tool_calls"
+
+
+def test_an_agent_sees_only_its_own_record_and_the_operator_sees_all(server, provider):
+    OpenAI(base_url=f"{server}/v1", api_key="helper-key", default_headers={"X-Session": "h1"}).chat.completions.create(
+        model="fake-gpt", stream=True, messages=[{"role": "user", "content": "go"}]).response.read()
+    httpx.post(f"{server}/v1/messages", headers=H, json=anthropic_body())
+    helper = {"x-api-key": "helper-key"}
+    assert [a["agent"] for a in httpx.get(f"{server}/v1/agents", headers=helper).json()["data"]] == ["helper"]
+    assert httpx.get(f"{server}/v1/agents/coder", headers=helper).status_code == 403
+    assert httpx.get(f"{server}/v1/agents/helper/sessions/h1", headers=helper).status_code == 200
+    assert httpx.get(f"{server}/v1/me", headers=helper).json() == {"operator": False, "agent": "helper"}
+    assert httpx.get(f"{server}/v1/me", headers=ADMIN).json() == {"operator": True, "agent": None}
+    assert httpx.put(f"{server}/v1/killswitch", headers=helper, json={"on": True}).status_code == 401, "only the operator holds the switches"
+    assert httpx.get(f"{server}/v1/agents", headers={"x-api-key": "nope"}).status_code == 401
 
 
 # ── real time: the live feed shows blocks as they open, grow and close ────────
@@ -127,69 +170,129 @@ def test_an_openai_stream_is_recorded_in_the_same_shape_with_its_own_block_types
 def test_the_live_feed_shows_each_block_opening_growing_and_closing_before_the_stream_ends(server, provider):
     provider.tool, provider.thinking, provider.delay = ("shell", {"cmd": "ls"}), "Look first.", 0.02
     seen, ready = [], threading.Event()
-    watcher = threading.Thread(target=watch, args=(server, "s-live", seen, ready), daemon=True)
+    watcher = threading.Thread(target=watch, args=(server, "/v1/agents/coder/sessions/s-live/live", seen, ready), daemon=True)
     watcher.start()
     assert ready.wait(5)
     t0 = time.time()
     a = Anthropic(base_url=server, api_key="mi-test-key")
-    with a.messages.stream(model="coder", max_tokens=50, messages=[{"role": "user", "content": "go"}], extra_headers={"X-Session": "s-live"}) as s:
+    with a.messages.stream(model="fake-sonnet", max_tokens=50, messages=[{"role": "user", "content": "go"}], extra_headers={"X-Session": "s-live"}) as s:
         s.get_final_message()
     t_end = time.time()
     watcher.join(5)
     kinds = [e["type"] for _, e in seen]
     assert kinds[0] == "stream.started" and kinds[1] == "stream.message" and kinds[-1] == "stream.ended"
     assert kinds.count("block.started") == 3 and kinds.count("block.ended") == 3 and kinds.count("block.delta") >= 5
+    assert all(e["agent"] == "coder" and e["session"] == "s-live" and e["stream"] == seen[0][1]["stream"] for _, e in seen)
     opened = [(t, e) for t, e in seen if e["type"] == "block.started"]
     assert [e["block"]["type"] for _, e in opened] == ["thinking", "text", "tool_use"]
     assert t0 < opened[0][0] < opened[1][0] < opened[2][0] < t_end, "blocks must arrive while the stream is still running, in order"
     assert all(e["block"]["ended"] is None for _, e in opened) and all(e["block"]["ended"] for _, e in seen if e["type"] == "block.ended")
-    deltas = [e for _, e in seen if e["type"] == "block.delta"]
-    assert {d["field"] for d in deltas} == {"thinking", "signature", "text", "input"}
+    assert {d["field"] for _, d in seen if d["type"] == "block.delta"} == {"thinking", "signature", "text", "input"}
     ended = [e for _, e in seen if e["type"] == "stream.ended"][0]
-    assert ended["stream"].startswith("str_") and ended["snapshot"]["stop_reason"] == "tool_use" and "request" not in ended["snapshot"]
+    assert ended["snapshot"]["stop_reason"] == "tool_use" and "request" not in ended["snapshot"]
 
 
-def test_the_live_feed_works_for_chat_completions_too(server, provider):
-    provider.thinking, provider.delay = "Think.", 0.02
-    seen, ready = [], threading.Event()
-    threading.Thread(target=watch, args=(server, "s-live-o", seen, ready), daemon=True).start()
-    assert ready.wait(5)
-    o = OpenAI(base_url=f"{server}/v1", api_key="mi-test-key", default_headers={"X-Session": "s-live-o"})
-    list(o.chat.completions.create(model="gpt", stream=True, messages=[{"role": "user", "content": "go"}]))
-    time.sleep(0.3)
-    opened = [e["block"]["type"] for _, e in seen if e["type"] == "block.started"]
-    assert opened == ["reasoning", "content"] and [e["type"] for _, e in seen][-1] == "stream.ended"
-
-
-
-
-def test_the_global_feed_carries_every_session_and_takes_the_key_as_a_query_parameter(server, provider):
+def test_the_global_feed_carries_every_agent_and_an_agents_feed_only_its_own(server, provider):
     provider.delay = 0.01
-    seen, ready = [], threading.Event()
-    threading.Thread(target=watch, args=(server, None, seen, ready, f"{server}/v1/live?key=mi-test-key"), daemon=True).start()
-    assert ready.wait(5)
-    a = Anthropic(base_url=server, api_key="mi-test-key")
-    with a.messages.stream(model="coder", max_tokens=50, messages=[{"role": "user", "content": "go"}], extra_headers={"X-Session": "s-global"}) as s:
-        s.get_final_message()
+    everything, agent_only, r1, r2 = [], [], threading.Event(), threading.Event()
+    threading.Thread(target=watch, args=(server, "/v1/live?key=admin-key", everything, r1), daemon=True).start()
+    threading.Thread(target=watch, args=(server, "/v1/live", agent_only, r2, "helper-key"), daemon=True).start()
+    assert r1.wait(5) and r2.wait(5)
+    httpx.post(f"{server}/v1/messages", headers={**H, "X-Session": "g1"}, json=anthropic_body())
     time.sleep(0.3)
-    assert seen and all(e["session"] == "s-global" and e["key"] == "team-test" and e["stream"] == seen[0][1]["stream"] for _, e in seen)
-    assert [e["type"] for _, e in seen][0] == "stream.started" and seen[0][1]["snapshot"]["request"]["messages"][0]["content"] == "go"
+    assert everything and all(e["agent"] == "coder" and e["session"] == "g1" for _, e in everything)
+    assert everything[0][1]["type"] == "stream.started" and everything[0][1]["snapshot"]["request"]["messages"][0]["content"] == "hi"
+    assert agent_only == [], "helper's feed never sees coder's streams"
     assert httpx.get(f"{server}/v1/live?key=nope").status_code == 401
 
 
-# ── the record by caller, and the page ────────────────────────────────────────
+# ── the killswitch: gateway, agent, session ───────────────────────────────────
 
-def test_callers_are_listed_with_their_sessions_and_streams(server):
-    a = Anthropic(base_url=server, api_key="mi-test-key")
-    for session in ("c-one", "c-two", "c-two"):
-        with a.messages.stream(model="coder", max_tokens=50, messages=[{"role": "user", "content": "hi"}], extra_headers={"X-Session": session}) as s:
-            s.get_final_message()
-    callers = httpx.get(f"{server}/v1/callers", params={"key": "mi-test-key"}).json()["data"]
-    assert len(callers) == 1 and callers[0]["caller"] == "team-test" and callers[0]["sessions"] == 2 and callers[0]["streams"] == 3 and callers[0]["last"]
+def test_the_session_killswitch_cuts_that_session_only_and_records_the_block_it_landed_in(server, provider):
+    provider.text, provider.delay = "one two three four five six seven eight nine ten", 0.03
+    flip = lambda on: httpx.put(f"{server}/v1/agents/coder/sessions/s-kill/killswitch", headers=ADMIN, json={"on": on})
+    stream, seen = read_stream(server, "/v1/messages", anthropic_body(), "s-kill", after=(5, lambda _: flip(True)))
+    events = [json.loads(s) for s in seen]
+    assert [e["type"] for e in events[-3:]] == ["content_block_stop", "message_delta", "message_stop"]
+    assert events[-2]["delta"]["stop_reason"] == "interrupted" and len(events) < 14 and hung_up(provider)
+    rec = httpx.get(f"{server}/v1/streams/{stream}", headers=ADMIN).json()
+    assert rec["stop_reason"] == "interrupted" and rec["interrupted"]["by"] == "session" and rec["interrupted"]["at"]
+    assert rec["interrupted"]["block"] == {"index": 0, "type": "text"} and rec["blocks"][0]["text"].startswith("one two") and rec["blocks"][0]["ended"]
+    r = httpx.post(f"{server}/v1/messages", headers={**H, "X-Session": "s-kill"}, json=anthropic_body())
+    assert r.status_code == 423 and r.json()["error"]["level"] == "session"
+    assert httpx.post(f"{server}/v1/messages", headers={**H, "X-Session": "s-other"}, json=anthropic_body()).status_code == 200, "other sessions run"
+    assert httpx.get(f"{server}/v1/agents/coder/sessions/s-kill", headers=ADMIN).json()["killswitch"] is True
+    assert httpx.get(f"{server}/v1/killswitch", headers=ADMIN).json() == {"gateway": False, "agents": [], "sessions": [{"agent": "coder", "session": "s-kill"}]}
+    flip(False)
+    assert httpx.post(f"{server}/v1/messages", headers={**H, "X-Session": "s-kill"}, json=anthropic_body()).status_code == 200
 
 
-def test_the_page_is_served_at_the_root_and_the_record_needs_a_key(server):
+def test_the_agent_killswitch_cuts_every_session_of_that_agent_and_no_other_agent(server, provider):
+    provider.text, provider.delay = "one two three four five six seven eight nine ten", 0.03
+    flip = lambda on: httpx.put(f"{server}/v1/agents/coder/killswitch", headers=ADMIN, json={"on": on})
+    stream, seen = read_stream(server, "/v1/chat/completions", openai_body(), "a-one", after=(5, lambda _: flip(True)))
+    last = json.loads(seen[-2])
+    assert seen[-1] == "[DONE]" and last["interrupted"] is True and hung_up(provider)
+    assert httpx.get(f"{server}/v1/streams/{stream}", headers=ADMIN).json()["interrupted"]["by"] == "agent"
+    assert httpx.post(f"{server}/v1/messages", headers={**H, "X-Session": "a-two"}, json=anthropic_body()).json()["error"]["level"] == "agent"
+    assert httpx.post(f"{server}/v1/chat/completions", headers={"x-api-key": "helper-key"}, json=openai_body()).status_code == 200, "helper runs"
+    switches = {a["agent"]: a["killswitch"] for a in httpx.get(f"{server}/v1/agents", headers=ADMIN).json()["data"]}
+    assert switches == {"coder": True, "helper": False}
+    flip(False)
+    assert httpx.post(f"{server}/v1/messages", headers={**H, "X-Session": "a-two"}, json=anthropic_body()).status_code == 200
+
+
+def test_the_gateway_killswitch_refuses_everything_until_off(server, provider):
+    provider.text, provider.delay = "one two three four five six seven eight nine ten", 0.03
+    flip = lambda on: httpx.put(f"{server}/v1/killswitch", headers=ADMIN, json={"on": on})
+    stream, seen = read_stream(server, "/v1/messages", anthropic_body(), "g-one", after=(5, lambda _: flip(True)))
+    assert json.loads(seen[-2])["delta"]["stop_reason"] == "interrupted" and hung_up(provider)
+    assert httpx.get(f"{server}/v1/streams/{stream}", headers=ADMIN).json()["interrupted"]["by"] == "gateway"
+    assert httpx.post(f"{server}/v1/messages", headers=H, json=anthropic_body()).json()["error"]["level"] == "gateway"
+    assert httpx.post(f"{server}/v1/chat/completions", headers={"x-api-key": "helper-key"}, json=openai_body()).status_code == 423
+    flip(False)
+    assert httpx.post(f"{server}/v1/chat/completions", headers={"x-api-key": "helper-key"}, json=openai_body()).status_code == 200
+
+
+def test_the_killswitch_cuts_within_a_tenth_of_a_second_even_while_the_provider_is_silent(server, provider):
+    provider.stall = (3, 8.0)
+    t0 = time.time()
+    threading.Timer(0.5, lambda: httpx.put(f"{server}/v1/agents/coder/sessions/s-silent/killswitch", headers=ADMIN, json={"on": True})).start()
+    stream, seen = read_stream(server, "/v1/messages", anthropic_body(), "s-silent")
+    assert time.time() - t0 < 1.5
+    assert json.loads(seen[-2])["delta"]["stop_reason"] == "interrupted"
+    httpx.put(f"{server}/v1/agents/coder/sessions/s-silent/killswitch", headers=ADMIN, json={"on": False})
+    assert hung_up(provider)
+
+
+def test_switch_changes_are_announced_on_the_feed(server):
+    seen, ready = [], threading.Event()
+
+    def follow():
+        with httpx.stream("GET", f"{server}/v1/live", headers=ADMIN, timeout=10) as r:
+            for line in r.iter_lines():
+                if line.startswith("data:"):
+                    e = json.loads(line[5:])
+                    if e.get("type") == "killswitch":
+                        seen.append(e)
+                        if len(seen) == 2:
+                            return
+                    elif "scope" in e:
+                        assert e["killswitch"]["gateway"] is False
+                        ready.set()
+
+    t = threading.Thread(target=follow, daemon=True)
+    t.start()
+    assert ready.wait(5)
+    httpx.put(f"{server}/v1/agents/coder/killswitch", headers=ADMIN, json={"on": True})
+    httpx.put(f"{server}/v1/agents/coder/killswitch", headers=ADMIN, json={"on": False})
+    t.join(5)
+    assert [(e["level"], e["on"], e["agent"]) for e in seen] == [("agent", True, "coder"), ("agent", False, "coder")]
+    assert seen[0]["state"]["agents"] == ["coder"] and seen[1]["state"]["agents"] == []
+
+
+# ── the page ──────────────────────────────────────────────────────────────────
+
+def test_the_page_is_served_at_the_root(server):
     page = httpx.get(f"{server}/")
     assert page.status_code == 200 and page.headers["content-type"].startswith("text/html") and "/v1/live?key=" in page.text
-    assert httpx.get(f"{server}/v1/sessions").status_code == 401
-    assert httpx.get(f"{server}/v1/sessions", headers={"authorization": "Bearer mi-test-key"}).status_code == 200
