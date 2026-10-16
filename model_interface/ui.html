@@ -9,12 +9,12 @@
   :root {
     --bg: #f6f7f9; --panel: #ffffff; --line: #e3e6ea; --text: #15181d; --muted: #6b7280;
     --accent: #2563eb; --accent-soft: #dbeafe; --ok: #16a34a; --bad: #dc2626; --bad-soft: #fee2e2; --live: #f59e0b;
-    --thinking: #7c3aed; --text-block: #2563eb; --tool: #d97706; --mono: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+    --thinking: #7c3aed; --text-block: #2563eb; --tool: #d97706; --other: #6b7280; --mono: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
   }
   @media (prefers-color-scheme: dark) {
     :root:not([data-theme="light"]) {
       --bg: #0f1115; --panel: #171a21; --line: #272b35; --text: #e6e8ec; --muted: #8b93a1;
-      --accent: #60a5fa; --accent-soft: #1e293b; --bad-soft: #3b1d1d; --thinking: #a78bfa; --text-block: #60a5fa; --tool: #fbbf24;
+      --accent: #60a5fa; --accent-soft: #1e293b; --bad-soft: #3b1d1d; --thinking: #a78bfa; --text-block: #60a5fa; --tool: #fbbf24; --other: #8b93a1;
     }
   }
   * { box-sizing: border-box; }
@@ -31,10 +31,11 @@
   button.switch.off:hover { background: var(--bad-soft); border-color: var(--bad); }
   button.switch.on { background: var(--bad); border-color: var(--bad); color: #fff; animation: pulse 1.2s infinite; }
   button.switch:disabled { opacity: .45; cursor: default; animation: none; }
+  button.small { font-size: 12px; padding: 3px 10px; }
+  button.small.active { background: var(--accent-soft); border-color: var(--accent); }
   .dot { width: 9px; height: 9px; border-radius: 50%; background: var(--muted); display: inline-block; flex: none; }
   .dot.on { background: var(--ok); box-shadow: 0 0 0 3px color-mix(in srgb, var(--ok) 25%, transparent); }
-  .dot.off { background: var(--bad); }
-  .dot.cut { background: var(--bad); }
+  .dot.off, .dot.cut { background: var(--bad); }
   main { flex: 1; display: grid; grid-template-columns: 280px 1fr; min-height: 0; }
   nav { border-right: 1px solid var(--line); background: var(--panel); overflow: auto; padding: 8px 0; }
   nav h2 { font-size: 11px; text-transform: uppercase; letter-spacing: .08em; color: var(--muted); margin: 10px 16px 4px; font-weight: 600; }
@@ -49,13 +50,37 @@
   nav .session.cut .name { color: var(--bad); }
   nav .session .count { color: var(--muted); font-size: 12px; }
   nav .empty { color: var(--muted); padding: 8px 16px; font-size: 13px; }
-  section { overflow: auto; padding: 16px 20px 40px; }
-  section .title { display: flex; align-items: center; gap: 12px; margin-bottom: 12px; }
-  section .title h2 { margin: 0; font-size: 16px; font-family: var(--mono); }
-  section .title small { color: var(--muted); flex: 1; }
+  section { display: flex; flex-direction: column; min-height: 0; }
+  .title { display: flex; align-items: center; gap: 12px; padding: 12px 20px 8px; }
+  .title h2 { margin: 0; font-size: 16px; font-family: var(--mono); }
+  .title small { color: var(--muted); flex: 1; }
+  /* the wire: one lane per stream on the session's clock, pieces as segments, deltas as ticks */
+  .wire { margin: 0 20px 10px; background: var(--panel); border: 1px solid var(--line); border-radius: 12px; padding: 8px 12px 4px; flex: none; }
+  .wire svg { width: 100%; display: block; font: 11px var(--mono); }
+  .wire .lane-label { fill: var(--text); font-weight: 600; }
+  .wire .lane-sub { fill: var(--muted); }
+  .wire .bar { fill: color-mix(in srgb, var(--muted) 16%, transparent); }
+  .wire .seg { cursor: pointer; }
+  .wire .seg.open { animation: pulse 1.2s infinite; }
+  .wire .seg.selected { stroke: var(--text); stroke-width: 1.5; }
+  .wire .tick { stroke: color-mix(in srgb, var(--panel) 70%, #000); stroke-width: 1; opacity: .55; pointer-events: none; }
+  .wire .cut, .wire .cut-label, .wire .now { pointer-events: none; }
+  .wire .axis { stroke: var(--line); }
+  .wire .axis-label { fill: var(--muted); }
+  .wire .now { stroke: var(--live); stroke-width: 1.5; stroke-dasharray: 3 3; }
+  .wire .cut { stroke: var(--bad); stroke-width: 2; }
+  .wire .cut-label { fill: var(--bad); font-weight: 600; }
+  .wire .legend { display: flex; gap: 14px; font-size: 11px; color: var(--muted); padding: 2px 2px 4px; }
+  .wire .legend i { display: inline-block; width: 10px; height: 10px; border-radius: 2px; margin-right: 4px; vertical-align: -1px; }
+  .split { flex: 1; display: grid; grid-template-columns: 1fr; min-height: 0; margin: 0 20px 16px; gap: 14px; }
+  .split.with-drawer { grid-template-columns: 1fr minmax(360px, 42%); }
+  .transcript { overflow: auto; min-height: 0; }
+  .drawer { overflow: auto; min-height: 0; }
+  /* the transcript: the session as it reads, each stream a card, pieces growing inside it */
   .stream { background: var(--panel); border: 1px solid var(--line); border-radius: 12px; margin-bottom: 14px; overflow: hidden; }
   .stream.running { border-color: var(--live); }
   .stream.interrupted { border-color: var(--bad); }
+  .stream.selected { box-shadow: 0 0 0 2px var(--accent-soft); }
   .stream .head { display: flex; align-items: center; gap: 10px; padding: 10px 14px; border-bottom: 1px solid var(--line); font-size: 13px; flex-wrap: wrap; }
   .stream .head .model { font-weight: 600; }
   .stream .head .id { font-family: var(--mono); color: var(--muted); font-size: 12px; }
@@ -67,41 +92,27 @@
   .ask { padding: 10px 14px; color: var(--muted); font-size: 13px; border-bottom: 1px solid var(--line); white-space: pre-wrap; max-height: 120px; overflow: auto; }
   .ask b { color: var(--text); font-weight: 600; margin-right: 6px; }
   .blocks { padding: 6px 14px; }
-  .block { display: grid; grid-template-columns: 92px 1fr; gap: 10px; padding: 8px 0; border-bottom: 1px dashed var(--line); }
+  .block { display: grid; grid-template-columns: 110px 1fr; gap: 10px; padding: 8px 0; border-bottom: 1px dashed var(--line); }
   .block:last-child { border-bottom: 0; }
+  .block.selected { background: color-mix(in srgb, var(--accent-soft) 50%, transparent); }
   .block .kind { font-size: 12px; font-weight: 600; }
   .block .kind small { display: block; color: var(--muted); font-weight: 400; font-variant-numeric: tabular-nums; }
-  .block.thinking .kind, .block.reasoning .kind, .block.reasoning_content .kind { color: var(--thinking); }
-  .block.text .kind, .block.content .kind { color: var(--text-block); }
-  .block.tool_use .kind, .block.tool_call .kind, .block.tool_calls .kind { color: var(--tool); }
-  .block .body .k { color: var(--muted); font-family: var(--mono); font-size: 12px; margin-right: 6px; }
   .block .body { white-space: pre-wrap; word-break: break-word; font-size: 13px; }
-  .block.thinking .body, .block.reasoning .body, .block.reasoning_content .body { color: var(--muted); font-style: italic; }
-  .block.tool_use .body, .block.tool_call .body, .block.tool_calls .body { font-family: var(--mono); font-size: 12.5px; }
   .block.open .body::after { content: "▍"; color: var(--live); animation: pulse .8s infinite; }
   .block.cut .body::after { content: " ✂ cut here"; color: var(--bad); font-style: normal; font-size: 12px; }
+  .k-text .kind, .k-text .node-k { color: var(--text-block); }
+  .k-thinking .kind, .k-thinking .body { color: var(--thinking); }
+  .k-thinking .body { font-style: italic; }
+  .k-tool .kind { color: var(--tool); }
+  .k-tool .body { font-family: var(--mono); font-size: 12.5px; }
+  .k-other .kind { color: var(--other); }
   .foot { display: flex; gap: 14px; padding: 8px 14px; border-top: 1px solid var(--line); color: var(--muted); font-size: 12px; font-variant-numeric: tabular-nums; flex-wrap: wrap; }
   .foot .error { color: var(--bad); }
   .foot .cut { color: var(--bad); font-weight: 600; }
-  .modes { display: flex; border: 1px solid var(--line); border-radius: 8px; overflow: hidden; }
-  .modes button { border: 0; border-radius: 0; padding: 4px 10px; font-size: 12px; background: var(--panel); color: var(--muted); }
-  .modes button.active { background: var(--accent-soft); color: var(--text); }
-  pre.tree { margin: 0; background: var(--panel); border: 1px solid var(--line); border-radius: 12px; padding: 14px 16px; font: 12.5px/1.65 var(--mono); overflow: auto; white-space: pre; }
-  .tree .guide { color: var(--line); }
-  .tree .node { font-weight: 600; }
-  .tree .level { color: var(--muted); font-weight: 400; }
-  .tree .time { color: var(--muted); }
-  .tree .on { color: var(--bad); font-weight: 600; }
-  .tree .cutmark { color: var(--bad); font-weight: 600; }
-  .tree .running { color: var(--live); }
-  .tree .preview { color: var(--muted); }
-  .tree .thinking, .tree .reasoning, .tree .reasoning_content { color: var(--thinking); }
-  .tree .text, .tree .content { color: var(--text-block); }
-  .tree .tool_use, .tree .tool_call, .tree .tool_calls { color: var(--tool); }
-  .structure { background: var(--panel); border: 1px solid var(--line); border-radius: 12px; padding: 10px 14px 14px; font: 12.5px/1.6 var(--mono); overflow: auto; }
-  .structure .bar { display: flex; gap: 8px; margin-bottom: 6px; font: 12px system-ui, sans-serif; color: var(--muted); align-items: center; }
+  /* the record: the document as nested nodes that grow in place */
+  .structure { background: var(--panel); border: 1px solid var(--line); border-radius: 12px; padding: 10px 14px 14px; font: 12.5px/1.6 var(--mono); }
+  .structure .bar { display: flex; gap: 8px; margin-bottom: 6px; font: 12px system-ui, sans-serif; color: var(--muted); align-items: center; flex-wrap: wrap; }
   .structure .bar button { font: inherit; padding: 2px 8px; border-radius: 6px; }
-  .structure .node { margin-left: 0; }
   .structure .children { margin-left: 18px; border-left: 1px solid var(--line); padding-left: 10px; }
   .structure .row { display: flex; align-items: baseline; gap: 6px; white-space: pre-wrap; word-break: break-word; }
   .structure .tog { cursor: pointer; color: var(--muted); user-select: none; width: 12px; display: inline-block; flex: none; }
@@ -115,9 +126,9 @@
   .structure .open-piece > .row > .k { text-decoration: underline dotted var(--live); }
   .structure .fresh { background: color-mix(in srgb, var(--live) 28%, transparent); border-radius: 3px; animation: fade 1.2s forwards; }
   @keyframes fade { to { background: transparent; } }
-  .hint { color: var(--muted); max-width: 560px; }
+  .hint { color: var(--muted); max-width: 560px; padding: 16px 20px; }
   .hint code { font-family: var(--mono); background: var(--panel); border: 1px solid var(--line); padding: 1px 5px; border-radius: 5px; }
-  @media (max-width: 760px) { main { grid-template-columns: 1fr; } nav { max-height: 200px; border-right: 0; border-bottom: 1px solid var(--line); } input { width: 120px; } }
+  @media (max-width: 900px) { main { grid-template-columns: 1fr; } nav { max-height: 200px; border-right: 0; border-bottom: 1px solid var(--line); } input { width: 120px; } .split.with-drawer { grid-template-columns: 1fr; } }
 </style>
 </head>
 <body>
@@ -133,9 +144,8 @@
   <nav id="nav"><div class="empty">Connect with the operator's key to see every agent, or with an agent's key to see that agent.</div></nav>
   <section id="view">
     <div class="hint">
-      <p>Every call that passes through the gateway appears here as it streams: its agent and session on the left, its blocks in the middle, opening, growing and closing in real time.</p>
+      <p>Every call that passes through the gateway is tapped as it flows. Pick a session: the wire at the top shows each stream on the session's clock, its pieces as segments and every delta as a tick; the transcript reads the session back; the record shows the exact document growing.</p>
       <p>Point an SDK at this address with an agent key, name the model as the provider names it, add an <code>X-Session</code> header, send a call with <code>stream: true</code>, and watch.</p>
-      <p>The red switches are the killswitch: one for the gateway, one per agent, one per session. On cuts every running stream beneath it and refuses new calls until it is turned off.</p>
     </div>
   </section>
 </main>
@@ -144,16 +154,19 @@
   // ── state: the record as this page knows it ───────────────────────────────
   const agents = new Map();          // name -> {agent, killswitch, sessions: Map(id -> session)}
   let selected = null, source = null, operator = false, gatewaySwitch = false;
-  let mode = "cards";                 // or "tree": the same session as one structure, a line per level
-  try { mode = localStorage.getItem("mi-mode") || "cards"; } catch (_) {}
+  let picked = null;                 // {stream, at} the piece the viewer clicked on the wire, or null
+  let drawerOpen = false;
+  let skew = 0;                      // server clock minus this clock, from the feed's own timestamps
   const $ = (id) => document.getElementById(id);
   const nav = $("nav"), view = $("view"), dot = $("dot"), keyInput = $("key"), gwSwitch = $("gw-switch");
   const esc = (s) => String(s ?? "").replace(/[&<>"]/g, (c) => ({"&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;"}[c]));
   const key = () => keyInput.value.trim();
   const api = (path, init = {}) => fetch(path, {...init, headers: {"x-api-key": key(), "content-type": "application/json", ...(init.headers || {})}})
     .then((r) => r.ok ? r.json() : Promise.reject(r.status));
+  const ms = (iso) => iso ? Date.parse(iso) : null;
+  const serverNow = () => Date.now() + skew;
   const clock = (iso) => iso ? new Date(iso).toLocaleTimeString([], {hour12: false}) + "." + String(new Date(iso).getMilliseconds()).padStart(3, "0") : "…";
-  const span = (a, b) => a && b ? ((new Date(b) - new Date(a)) / 1000).toFixed(2) + "s" : "";
+  const span = (a, b) => a && b ? ((ms(b) - ms(a)) / 1000).toFixed(2) + "s" : "";
   const sw = (on, label, attrs) => `<button class="switch ${on ? "on" : "off"}" ${attrs} ${operator ? "" : "disabled"}>${label}: ${on ? "ON" : "off"}</button>`;
 
   function agent(name) {
@@ -168,6 +181,46 @@
     return s;
   }
   const selectedSession = () => selected && agents.get(selected.agent)?.sessions.get(selected.session);
+  const streamsOf = (s) => [...s.streams.values()].sort((a, b) => a.started.localeCompare(b.started));
+
+  // ── the merge: a delta folded into a piece by shape, never by name, as the gateway does it ──
+  const indexed = (v) => Array.isArray(v) && v.length > 0 && v.every((x) => x && typeof x === "object" && "index" in x);
+  function merge(acc, delta) {
+    for (const [k, v] of Object.entries(delta)) {
+      const a = acc[k];
+      if (a != null && (v == null || k === "type")) continue;
+      if (typeof a === "string" && typeof v === "string") acc[k] = a + v;
+      else if (a && typeof a === "object" && !Array.isArray(a) && v && typeof v === "object" && !Array.isArray(v)) merge(a, v);
+      else if (Array.isArray(a) && indexed(v)) { for (const item of v) { while (a.length <= item.index) a.push({}); merge(a[item.index], item); } }
+      else if (Array.isArray(a) && Array.isArray(v)) a.push(...structuredClone(v));
+      else acc[k] = structuredClone(v);
+    }
+    return acc;
+  }
+  const OURS = ["at", "started", "ended"];
+  const strip = (b) => Object.fromEntries(Object.entries(b).filter(([k]) => !OURS.includes(k) && k !== "partial_json"));
+  const KIND = {text: "text", content: "text", thinking: "thinking", reasoning: "thinking", reasoning_content: "thinking", tool_use: "tool", tool_calls: "tool", tool_call: "tool"};
+  const kindOf = (b) => KIND[(b.type || b.at.split(".").pop()).replace(/\[.*$/, "")] || "other";
+  const COLOR = {text: "var(--text-block)", thinking: "var(--thinking)", tool: "var(--tool)", other: "var(--other)"};
+  const labelOf = (b) => b.type || b.at.split(".").pop();
+
+  // ── the response, whole, in the provider's shape, composed from the head and the pieces ──
+  function composeResponse(st, withTimes = false) {
+    const head = structuredClone(st.response || {}), blocks = st.blocks || [];
+    const piece = withTimes ? (b) => Object.fromEntries(Object.entries(b).filter(([k]) => k !== "partial_json" || !b.ended)) : strip;
+    if (st.format === "anthropic") return {...head, content: blocks.map(piece)};
+    const choices = head.choices || [{index: 0, message: {}}];
+    delete head.blocks; delete head.choices;
+    for (const b of blocks) {
+      const m = (choices[0].message ||= {});
+      const path = b.at.replace(/^choices\[\d+\]\.message\./, "");
+      const list = path.match(/^(\w+)\[(\d+)\]$/);
+      if (list) { (m[list[1]] ||= [])[+list[2]] = strip(b); } else m[path] = b[path];
+    }
+    delete head.obfuscation;
+    return {...head, object: "chat.completion", choices, ...(withTimes ? {blocks: blocks.map(piece)} : {})};
+  }
+  const endOf = (st) => { const r = composeResponse(st); return r.stop_reason ? `stop_reason ${r.stop_reason}` : r.choices?.[0]?.finish_reason ? `finish_reason ${r.choices[0].finish_reason}` : ""; };
 
   // ── the sidebar: agents, their sessions, their switches ───────────────────
   function drawNav() {
@@ -196,12 +249,6 @@
     if (el) select(el.dataset.agent, el.dataset.id);
   });
   gwSwitch.onclick = () => flip(null, null, !gatewaySwitch);
-  view.addEventListener("click", (e) => {
-    const m = e.target.closest(".modes button");
-    if (m) { mode = m.dataset.mode; try { localStorage.setItem("mi-mode", mode); } catch (_) {} drawSession(); return; }
-    const b = e.target.closest("button.switch");
-    if (b && selected) flip(selected.agent, selected.session, !selectedSession().killswitch);
-  });
   async function flip(name, id, on) {
     if (!operator) return;
     const path = name == null ? "/v1/killswitch" : id == null ? `/v1/agents/${encodeURIComponent(name)}/killswitch` : `/v1/agents/${encodeURIComponent(name)}/sessions/${encodeURIComponent(id)}/killswitch`;
@@ -213,20 +260,105 @@
     for (const a of agents.values()) for (const s of a.sessions.values()) s.killswitch = state.sessions.some((x) => x.agent === s.agent && x.session === s.session);
   }
 
-  // ── the main pane: one session's streams, block by block ──────────────────
+  // ── the main pane: title, wire, transcript, record ────────────────────────
   async function select(name, id) {
-    selected = {agent: name, session: id};
+    selected = {agent: name, session: id}; picked = null;
     drawNav();
     try {
       const snap = await api(`/v1/agents/${encodeURIComponent(name)}/sessions/${encodeURIComponent(id)}`);
       const s = session(name, id, snap.started);
-      s.streams = new Map(snap.streams.map((st) => [st.id, st]));
-      s.count = s.streams.size;
-      s.ended = snap.ended;
-      s.killswitch = snap.killswitch;
+      const ticks = new Map([...s.streams.values()].map((st) => [st.id, st.ticks]));
+      s.streams = new Map(snap.streams.map((st) => [st.id, {...st, ticks: ticks.get(st.id) || new Map()}]));
+      s.count = s.streams.size; s.ended = snap.ended; s.killswitch = snap.killswitch;
     } catch (e) { /* a session only seen live is drawn from what we have */ }
     drawSession();
   }
+  function title(s) {
+    return `<h2>${esc(s.agent)} / ${esc(s.session)}</h2><small>${s.count} stream${s.count === 1 ? "" : "s"}${s.interrupted ? ` · ${s.interrupted} cut` : ""}</small>
+      <button class="small${drawerOpen ? " active" : ""}" data-drawer>record</button>${sw(s.killswitch, "kill session", "")}`;
+  }
+  function drawTitle() { const s = selectedSession(); const t = view.querySelector(".title"); if (s && t) t.innerHTML = title(s); }
+  function drawSession() {
+    const s = selectedSession();
+    if (!s) { view.innerHTML = ""; return; }
+    const tr = view.querySelector(".transcript"), top = tr ? tr.scrollTop : 0;
+    view.innerHTML = `<div class="title">${title(s)}</div><div class="wire" id="wire">${drawWire(s)}</div>
+      <div class="split${drawerOpen ? " with-drawer" : ""}"><div class="transcript">${streamsOf(s).map(drawStream).join("")}</div>${drawerOpen ? `<aside class="drawer">${drawStructure(s)}</aside>` : ""}</div>`;
+    const t = view.querySelector(".transcript");
+    t.scrollTop = top || t.scrollHeight;
+  }
+  view.addEventListener("click", (e) => {
+    const m = e.target.closest(".structure .more[data-more]");
+    if (m) { unfolded.add(m.dataset.more); drawSession(); return; }
+    const t = e.target.closest(".structure .tog[data-path]");
+    if (t) { const p = t.dataset.path; if (isFolded(p)) { collapsed.delete(p); opened.add(p); } else { collapsed.add(p); opened.delete(p); } drawSession(); return; }
+    const f = e.target.closest(".structure button[data-fold]");
+    if (f) { fold(f.dataset.fold); drawSession(); return; }
+    const seg = e.target.closest(".wire .seg[data-stream]");
+    if (seg) { pick(seg.dataset.stream, seg.dataset.at); return; }
+    const d = e.target.closest("button[data-drawer]");
+    if (d) { drawerOpen = !drawerOpen; drawSession(); return; }
+    const b = e.target.closest("button.switch");
+    if (b && selected) flip(selected.agent, selected.session, !selectedSession().killswitch);
+  });
+  function pick(streamId, at) {
+    picked = picked && picked.stream === streamId && picked.at === at ? null : {stream: streamId, at};
+    drawerOpen = drawerOpen || !!picked;
+    drawSession();
+    const card = document.getElementById(`st-${streamId}`);
+    if (card) card.scrollIntoView({block: "nearest", behavior: "smooth"});
+  }
+
+  // ── the wire: the session's clock, one lane per stream, pieces as segments, deltas as ticks ──
+  function drawWire(s) {
+    const streams = streamsOf(s);
+    if (!streams.length) return `<div class="legend">no streams yet</div>`;
+    const running = streams.some((st) => !st.ended);
+    const t0 = ms(s.started), tEnd = running ? serverNow() : Math.max(...streams.map((st) => ms(st.ended)));
+    const spanMs = Math.max(1000, tEnd - t0);
+    const W = Math.max(600, (document.getElementById("wire") || view).clientWidth - 24), L = 150, R = 20, rowH = 30, top = 8;
+    const x = (t) => L + ((t - t0) / spanMs) * (W - L - R);
+    const H = top + rowH * streams.length + 22;
+    let svg = `<svg viewBox="0 0 ${W} ${H}" preserveAspectRatio="none" height="${H}">`;
+    const step = [100, 250, 500, 1000, 2000, 5000, 10000, 30000, 60000, 300000].find((v) => spanMs / v <= 12) || 600000;
+    for (let t = 0; t <= spanMs; t += step) {
+      const px = x(t0 + t);
+      svg += `<line class="axis" x1="${px}" y1="${top}" x2="${px}" y2="${H - 18}"/><text class="axis-label" x="${px + 3}" y="${H - 6}">${t >= 1000 ? (t / 1000) + "s" : t + "ms"}</text>`;
+    }
+    streams.forEach((st, i) => {
+      const y = top + i * rowH, a = ms(st.started), b = st.ended ? ms(st.ended) : tEnd;
+      svg += `<text class="lane-label" x="4" y="${y + 13}">${esc(st.model)}</text><text class="lane-sub" x="4" y="${y + 25}">${esc(st.format)} · ${((b - a) / 1000).toFixed(1)}s</text>`;
+      svg += `<rect class="bar" x="${x(a)}" y="${y + 4}" width="${Math.max(1, x(b) - x(a))}" height="${rowH - 8}" rx="3"/>`;
+      for (const p of st.blocks || []) {
+        const pa = ms(p.started), pb = p.ended ? ms(p.ended) : tEnd, open = !p.ended && !st.ended;
+        const sel = picked && picked.stream === st.id && picked.at === p.at;
+        const ticks = (st.ticks && st.ticks.get(p.at)) || [];
+        svg += `<rect class="seg${open ? " open" : ""}${sel ? " selected" : ""}" data-stream="${esc(st.id)}" data-at="${esc(p.at)}" x="${x(pa)}" y="${y + 7}" width="${Math.max(2, x(pb) - x(pa))}" height="${rowH - 14}" rx="2" fill="${COLOR[kindOf(p)]}">
+          <title>${esc(p.at)}${p.type ? " · " + esc(p.type) : ""}\n${clock(p.started)} → ${p.ended ? clock(p.ended) : "open"} · ${((pb - pa) / 1000).toFixed(2)}s\n${ticks.length} delta${ticks.length === 1 ? "" : "s"} seen live</title></rect>`;
+        for (const t of ticks) svg += `<line class="tick" x1="${x(t)}" y1="${y + 9}" x2="${x(t)}" y2="${y + rowH - 9}"/>`;
+      }
+      if (st.interrupted) {
+        const tc = x(ms(st.interrupted.at));
+        const left = tc > W - R - 70;
+        svg += `<line class="cut" x1="${tc}" y1="${y + 2}" x2="${tc}" y2="${y + rowH - 2}"/><text class="cut-label" x="${left ? tc - 4 : tc + 4}" y="${y + 12}" text-anchor="${left ? "end" : "start"}">✂ ${esc(st.interrupted.by)}</text>`;
+      }
+    });
+    if (running) { const n = x(tEnd); svg += `<line class="now" x1="${n}" y1="${top}" x2="${n}" y2="${H - 18}"/>`; }
+    svg += `</svg>`;
+    const legend = Object.entries(COLOR).map(([k, c]) => `<span><i style="background:${c}"></i>${k}</span>`).join("") +
+      `<span>· a bar is one connection, open to close · a segment is one piece · a tick is one delta, seen live · ✂ a cut</span>`;
+    return svg + `<div class="legend">${legend}</div>`;
+  }
+  let wireTimer = null;
+  function tickWire() {
+    const s = selectedSession(), w = document.getElementById("wire");
+    if (s && w) w.innerHTML = drawWire(s);
+    const running = s && [...s.streams.values()].some((st) => !st.ended);
+    if (!running && wireTimer) { clearInterval(wireTimer); wireTimer = null; }
+  }
+  function keepWireMoving() { if (!wireTimer) wireTimer = setInterval(tickWire, 150); }
+
+  // ── the transcript: the session as it reads, each stream a card, pieces growing inside it ──
   function lastAsk(request) {
     const m = (request?.messages || []).filter((x) => x.role === "user").pop();
     if (!m) return request?.prompt || "";
@@ -240,114 +372,44 @@
   }
   function drawBlock(b, st) {
     const cut = st.interrupted && st.interrupted.block && st.interrupted.block.at === b.at;
-    const kind = kindOf(b);
-    return `<div class="block ${esc(kind)}${b.ended ? "" : " open"}${cut ? " cut" : ""}" data-at="${esc(b.at)}">
-      <div class="kind" title="${esc(b.at)}">${esc(b.type || b.at.split(".").pop())}<small>${clock(b.started)}</small><small>${b.ended ? span(b.started, b.ended) : "…"}</small></div>
+    const sel = picked && picked.stream === st.id && picked.at === b.at;
+    return `<div class="block k-${kindOf(b)}${b.ended ? "" : " open"}${cut ? " cut" : ""}${sel ? " selected" : ""}" data-at="${esc(b.at)}">
+      <div class="kind" title="${esc(b.at)}">${esc(labelOf(b))}<small>${clock(b.started)}</small><small>${b.ended ? span(b.started, b.ended) : "…"}</small></div>
       <div class="body">${esc(bodyOf(b))}</div></div>`;
   }
-  // ── the merge: a delta folded into a piece by shape, never by name, as the gateway does it ──
-  const indexed = (v) => Array.isArray(v) && v.length > 0 && v.every((x) => x && typeof x === "object" && "index" in x);
-  function merge(acc, delta) {
-    for (const [k, v] of Object.entries(delta)) {
-      const a = acc[k];
-      if (a != null && (v == null || k === "type")) continue;
-      if (typeof a === "string" && typeof v === "string") acc[k] = a + v;
-      else if (a && typeof a === "object" && !Array.isArray(a) && v && typeof v === "object" && !Array.isArray(v)) merge(a, v);
-      else if (Array.isArray(a) && indexed(v)) { for (const item of v) { while (a.length <= item.index) a.push({}); merge(a[item.index], item); } }
-      else if (Array.isArray(a) && Array.isArray(v)) a.push(...structuredClone(v));
-      else acc[k] = structuredClone(v);
-    }
-    return acc;
-  }
-  const OURS = ["at", "started", "ended"];
-  const strip = (b) => Object.fromEntries(Object.entries(b).filter(([k]) => !OURS.includes(k) && k !== "partial_json"));
-  const kindOf = (b) => (b.type || b.at.split(".").pop()).replace(/\[.*$/, "");
-  function composeResponse(st, withTimes = false) {
-    const head = structuredClone(st.response || {}), blocks = st.blocks || [];
-    const piece = withTimes ? (b) => Object.fromEntries(Object.entries(b).filter(([k]) => k !== "partial_json" || !b.ended)) : strip;
-    if (st.format === "anthropic") {
-      return {...head, content: blocks.map(piece)};
-    }
-    const choices = head.choices || [{index: 0, message: {}}];
-    delete head.blocks; delete head.choices;
-    for (const b of blocks) {                          // each piece back at its place in the message
-      const m = (choices[0].message ||= {});
-      const path = b.at.replace(/^choices\[\d+\]\.message\./, "");
-      const list = path.match(/^(\w+)\[(\d+)\]$/);
-      if (list) { (m[list[1]] ||= [])[+list[2]] = strip(b); }
-      else m[path] = b[path];
-    }
-    delete head.obfuscation;
-    return {...head, object: "chat.completion", choices, ...(withTimes ? {blocks: blocks.map(piece)} : {})};
-  }
-  const endOf = (st) => { const r = composeResponse(st); return r.stop_reason ? `stop_reason ${r.stop_reason}` : r.choices?.[0]?.finish_reason ? `finish_reason ${r.choices[0].finish_reason}` : ""; };
   function drawFoot(st) {
     const u = composeResponse(st).usage || {};
     const tokens = u.input_tokens != null ? `${u.input_tokens} in · ${u.output_tokens} out` : u.prompt_tokens != null ? `${u.prompt_tokens} in · ${u.completion_tokens} out` : "";
-    const parts = [st.ended ? `ended ${clock(st.ended)}` : "streaming", span(st.started, st.ended), endOf(st), tokens];
+    const first = (st.blocks || [])[0];
+    const parts = [st.ended ? `ended ${clock(st.ended)}` : "streaming", span(st.started, st.ended), first ? `first piece after ${span(st.started, first.started)}` : "", endOf(st), tokens];
     if (st.interrupted) parts.push(`<span class="cut">cut by the ${esc(st.interrupted.by)} killswitch at ${clock(st.interrupted.at)}</span>`);
     if (st.error) parts.push(`<span class="error">${esc(st.error)}</span>`);
     return parts.filter(Boolean).join("<span>·</span>");
   }
   function drawStream(st) {
     const state = st.interrupted ? " interrupted" : st.ended ? "" : " running";
-    return `<article class="stream${state}" id="st-${esc(st.id)}">
+    const sel = picked && picked.stream === st.id;
+    return `<article class="stream${state}${sel ? " selected" : ""}" id="st-${esc(st.id)}">
       <div class="head"><span class="model">${esc(st.model)}</span><span class="badge">${esc(st.provider)} · ${esc(st.format)}</span>
         ${st.interrupted ? '<span class="badge cut">interrupted</span>' : st.ended ? "" : '<span class="badge live">live</span>'}<span class="id">${esc(st.id)}</span><span class="when">${clock(st.started)}</span></div>
       <div class="ask"><b>user</b>${esc(lastAsk(st.request))}</div>
       <div class="blocks">${(st.blocks || []).map((b) => drawBlock(b, st)).join("")}</div>
       <div class="foot">${drawFoot(st)}</div></article>`;
   }
-  function title(s) {
-    const modes = `<span class="modes">${["cards", "tree", "structure"].map((m) => `<button data-mode="${m}" class="${mode === m ? "active" : ""}">${m}</button>`).join("")}</span>`;
-    return `<h2>${esc(s.agent)} / ${esc(s.session)}</h2><small>${s.count} stream${s.count === 1 ? "" : "s"}${s.interrupted ? ` · ${s.interrupted} cut` : ""}</small>${modes}${sw(s.killswitch, "kill session", "")}`;
-  }
-  // ── the tree: the same session as one structure, where each thing started, ended, and was stopped ──
-  function drawTree(s) {
-    const streams = [...s.streams.values()].sort((a, b) => a.started.localeCompare(b.started));
-    const cutFrom = new Set(streams.filter((st) => st.interrupted).map((st) => st.interrupted.by));
-    const a = agents.get(s.agent);
-    const when = (x, y) => `<span class="time">${clock(x)} → ${y ? clock(y) : "…"}${y ? " · " + span(x, y) : ""}</span>`;
-    const mark = (level) => cutFrom.has(level) ? `  <span class="cutmark">⚡ switch pulled here</span>` : "";
-    const state = (on) => on ? `<span class="on">switch ON</span>` : `<span class="level">switch off</span>`;
-    const preview = (b) => { const t = bodyOf(b).replace(/\s+/g, " ").trim(); return t ? `<span class="preview">${esc(t.length > 90 ? t.slice(0, 90) + "…" : t)}</span>` : ""; };
-    const lines = [];
-    lines.push(`<span class="node">gateway</span>  ${state(gatewaySwitch)}${mark("gateway")}`);
-    lines.push(`<span class="guide">└─</span> <span class="node">${esc(s.agent)}</span>  <span class="level">agent</span>  ${state(a?.killswitch)}${mark("agent")}`);
-    lines.push(`<span class="guide">   └─</span> <span class="node">${esc(s.session)}</span>  <span class="level">session</span>  ${when(s.started, s.ended)}  ${state(s.killswitch)}${mark("session")}`);
-    streams.forEach((st, i) => {
-      const lastStream = i === streams.length - 1;
-      const g1 = `<span class="guide">      ${lastStream ? "└─" : "├─"}</span>`, g2 = `<span class="guide">      ${lastStream ? "  " : "│ "}</span>`;
-      const status = st.interrupted ? `<span class="cutmark">interrupted · cut by the ${esc(st.interrupted.by)} switch at ${clock(st.interrupted.at)}</span>`
-                   : st.ended ? `<span class="level">${esc(endOf(st))}${st.error ? " · error" : ""}</span>` : `<span class="running">streaming</span>`;
-      lines.push(`${g1} <span class="node">${esc(st.id)}</span>  <span class="level">stream · ${esc(st.model)} · ${esc(st.provider)}</span>  ${when(st.started, st.ended)}  ${status}`);
-      const blocks = st.blocks || [];
-      blocks.forEach((b, j) => {
-        const last = j === blocks.length - 1;
-        const landed = st.interrupted && st.interrupted.block && st.interrupted.block.at === b.at;
-        lines.push(`${g2}<span class="guide">   ${last ? "└─" : "├─"}</span> <span class="node ${esc(kindOf(b))}">${esc(b.at)}${b.type ? " · " + esc(b.type) : ""}</span>  ${when(b.started, b.ended)}${b.ended ? "" : '  <span class="running">open</span>'}${landed ? '  <span class="cutmark">✂ cut landed here</span>' : ""}`);
-        const pv = preview(b);
-        if (pv) lines.push(`${g2}<span class="guide">   ${last ? "  " : "│ "}</span>     ${pv}`);
-      });
-      if (!blocks.length) lines.push(`${g2}<span class="guide">   └─</span> <span class="level">no blocks yet</span>`);
-    });
-    return `<pre class="tree">${lines.join("\n")}</pre>`;
-  }
-  // ── the structure: the session document as nested, collapsible nodes that grow in place ─────────
-  const collapsed = new Set();                        // paths the viewer folded; everything else stays open as it grows
-  const opened = new Set();                           // request bodies the viewer unfolded; requests are big and never change
-  let foldRequests = true;
-  let followOpen = true;                              // keep the piece that is growing in view
+  const el = (st, sel) => document.querySelector(`#st-${CSS.escape(st.id)} ${sel}`);
+
+  // ── the record: the document as nested, collapsible nodes that grow in place ──
+  const collapsed = new Set(), opened = new Set(), unfolded = new Set(), seen = new Map();
+  let foldRequests = true, followOpen = true;
   const isFolded = (path) => collapsed.has(path) || (foldRequests && path.endsWith(".request") && !opened.has(path));
-  const seen = new Map();                             // path -> last rendered value, to flash what changed
   const isObj = (v) => v && typeof v === "object";
   function docOf(s) {
-    const streams = [...s.streams.values()].sort((a, b) => a.started.localeCompare(b.started));
-    return {agent: s.agent, session: s.session, started: s.started, ended: s.ended, killswitch: s.killswitch, streams: streams.map((st) => ({
-      id: st.id, started: st.started, ended: st.ended, provider: st.provider, model: st.model, format: st.format,
-      request: st.request, response: composeResponse(st, true), interrupted: st.interrupted, error: st.error}))};
+    const st = picked && s.streams.get(picked.stream);
+    const one = (x) => ({id: x.id, started: x.started, ended: x.ended, provider: x.provider, model: x.model, format: x.format,
+                         request: x.request, response: composeResponse(x, true), interrupted: x.interrupted, error: x.error});
+    if (st) return {agent: s.agent, session: s.session, stream: one(st)};
+    return {agent: s.agent, session: s.session, started: s.started, ended: s.ended, killswitch: s.killswitch, streams: streamsOf(s).map(one)};
   }
-  const unfolded = new Set();                         // long strings the viewer opened
   function leaf(v, path, live) {
     if (typeof v === "string") {
       if (!live && v.length > 240 && !unfolded.has(path)) return `<span class="s">"${esc(v.slice(0, 160))}</span><span class="tog more" data-more="${esc(path)}"> … ${v.length - 160} more</span>`;
@@ -365,100 +427,77 @@
     const entries = Array.isArray(v) ? v.map((x, i) => [i, x]) : Object.entries(v);
     const folded = isFolded(path);
     const meta = Array.isArray(v) ? `[${entries.length}]` : `{${entries.length}}`;
-    const live = isObj(v) && !Array.isArray(v) && "at" in v && v.ended === null;        // a piece still growing
+    const live = !Array.isArray(v) && "at" in v && v.ended === null;
     return `<div class="node${live ? " open-piece" : ""}"><div class="row"><span class="tog" data-path="${esc(path)}">${folded ? "▸" : "▾"}</span><span class="k">${esc(key)}</span><span class="meta">${meta}${live ? " · open" : ""}</span></div>` +
       (folded ? "" : `<div class="children">${entries.map(([k, x]) => node(String(k), x, `${path}.${k}`, inOpen || live, fresh)).join("")}</div>`) + `</div>`;
   }
   function drawStructure(s) {
     const doc = docOf(s), fresh = new Set();
-    (function walk(v, path) {                      // what changed since the last draw: a leaf whose value differs
+    (function walk(v, path) {
       if (!isObj(v)) { if (seen.has(path) && seen.get(path) !== JSON.stringify(v)) fresh.add(path); return; }
       for (const [k, x] of Array.isArray(v) ? v.map((x, i) => [i, x]) : Object.entries(v)) walk(x, `${path}.${k}`);
     })(doc, "$");
-    return `<div class="structure"><div class="bar"><span>the session as the record holds it, growing as the stream does</span>
+    return `<div class="structure"><div class="bar"><span>${picked ? "the picked stream" : "the session"}, as the record holds it</span>
       <button data-fold="all">collapse all</button><button data-fold="none">expand all</button><button data-fold="requests">${foldRequests ? "show" : "fold"} requests</button><button data-fold="follow">${followOpen ? "stop following" : "follow growth"}</button></div>` +
-      node("session", doc, "$", false, fresh) + `</div>`;
+      node(picked ? "stream" : "session", doc, "$", false, fresh) + `</div>`;
   }
-  view.addEventListener("click", (e) => {
-    const m = e.target.closest(".structure .more[data-more]");
-    if (m) { unfolded.add(m.dataset.more); drawSession(); return; }
-    const t = e.target.closest(".structure .tog[data-path]");
-    if (t) {
-      const path = t.dataset.path;
-      if (isFolded(path)) { collapsed.delete(path); opened.add(path); } else { collapsed.add(path); opened.delete(path); }
-      drawSession(); return;
-    }
-    const f = e.target.closest(".structure button[data-fold]");
-    if (!f) return;
-    if (f.dataset.fold === "all") { collapsed.clear(); (function fold(v, path) { if (!isObj(v)) return; if (path !== "$") collapsed.add(path); for (const [k, x] of Array.isArray(v) ? v.map((x, i) => [i, x]) : Object.entries(v)) fold(x, `${path}.${k}`); })(docOf(selectedSession()), "$"); }
-    if (f.dataset.fold === "none") { collapsed.clear(); opened.clear(); foldRequests = false; }
-    if (f.dataset.fold === "requests") foldRequests = !foldRequests;
-    if (f.dataset.fold === "follow") followOpen = !followOpen;
-    drawSession();
-  });
-  let redrawPending = false;
-  function redrawTree() {               // live events redraw the tree or the json whole, at most once a frame
-    if (redrawPending) return;
-    redrawPending = true;
+  function fold(what) {
+    if (what === "all") { collapsed.clear(); (function f(v, path) { if (!isObj(v)) return; if (path !== "$") collapsed.add(path); for (const [k, x] of Array.isArray(v) ? v.map((x, i) => [i, x]) : Object.entries(v)) f(x, `${path}.${k}`); })(docOf(selectedSession()), "$"); }
+    if (what === "none") { collapsed.clear(); opened.clear(); foldRequests = false; }
+    if (what === "requests") foldRequests = !foldRequests;
+    if (what === "follow") followOpen = !followOpen;
+  }
+  let drawerPending = false;
+  function redrawDrawer() {
+    if (!drawerOpen || drawerPending) return;
+    drawerPending = true;
     requestAnimationFrame(() => {
-      redrawPending = false;
-      const s = selectedSession(), t = view.querySelector("pre.tree, .structure");
-      if (s && t) t.outerHTML = mode === "tree" ? drawTree(s) : drawStructure(s);
-      if (mode === "structure" && followOpen) { const o = view.querySelector(".open-piece"); if (o) o.scrollIntoView({block: "nearest"}); }
+      drawerPending = false;
+      const s = selectedSession(), d = view.querySelector(".drawer");
+      if (s && d) { d.innerHTML = drawStructure(s); if (followOpen) { const o = d.querySelector(".open-piece"); if (o) o.scrollIntoView({block: "nearest"}); } }
     });
   }
-  function drawTitle() { const s = selectedSession(); const t = view.querySelector(".title"); if (s && t) t.innerHTML = title(s); }
-  function drawSession() {
-    const s = selectedSession();
-    if (!s) { view.innerHTML = ""; return; }
-    const streams = [...s.streams.values()].sort((a, b) => a.started.localeCompare(b.started));
-    const top = view.scrollTop;
-    view.innerHTML = `<div class="title">${title(s)}</div>` + (mode === "tree" ? drawTree(s) : mode === "structure" ? drawStructure(s) : streams.map(drawStream).join(""));
-    view.scrollTop = mode === "structure" ? top : view.scrollHeight;
-  }
-  const inView = (e) => selected && e.agent === selected.agent && e.session === selected.session;
-  const el = (st, sel) => document.querySelector(`#st-${CSS.escape(st.id)} ${sel}`);
 
   // ── the live feed: the record's own events, applied as they arrive ────────
+  const inView = (e) => selected && e.agent === selected.agent && e.session === selected.session;
   const handlers = {
     "stream.started"(e) {
       const s = session(e.agent, e.session, e.snapshot.started);
-      const st = {...e.snapshot, blocks: []};
-      s.streams.set(st.id, st);
-      s.count += 1;
-      s.ended = null;
+      const st = {...e.snapshot, blocks: [], ticks: new Map()};
+      s.streams.set(st.id, st); s.count += 1; s.ended = null;
       if (!selected) { select(e.agent, e.session); return; }
-      if (inView(e)) { drawTitle(); if (mode !== "cards") redrawTree(); else { view.insertAdjacentHTML("beforeend", drawStream(st)); view.scrollTop = view.scrollHeight; } }
+      if (inView(e)) { drawTitle(); const t = view.querySelector(".transcript"); if (t) { t.insertAdjacentHTML("beforeend", drawStream(st)); t.scrollTop = t.scrollHeight; } keepWireMoving(); tickWire(); redrawDrawer(); }
     },
-    "stream.response"(e, st) { Object.assign(st.response ||= {}, e.response); if (inView(e) && mode !== "cards") redrawTree(); },
+    "stream.response"(e, st) { merge(st.response ||= {}, structuredClone(e.response)); if (inView(e)) redrawDrawer(); },
     "block.started"(e, st) {
-      st.blocks.push(e.block);
-      if (inView(e)) { if (mode !== "cards") redrawTree(); else { const box = el(st, ".blocks"); if (box) box.insertAdjacentHTML("beforeend", drawBlock(e.block, st)); view.scrollTop = view.scrollHeight; } }
+      st.blocks.push(e.block); st.ticks.set(e.at, [ms(e.time)]);
+      if (inView(e)) { const box = el(st, ".blocks"); if (box) box.insertAdjacentHTML("beforeend", drawBlock(e.block, st)); const t = view.querySelector(".transcript"); if (t) t.scrollTop = t.scrollHeight; tickWire(); redrawDrawer(); }
     },
     "block.delta"(e, st) {
       const b = st.blocks.find((x) => x.at === e.at); if (!b) return;
-      merge(b, e.delta);
-      if (inView(e)) { if (mode !== "cards") redrawTree(); else { const body = el(st, `.block[data-at="${CSS.escape(e.at)}"] .body`); if (body) body.textContent = bodyOf(b); } }
+      merge(b, e.delta); (st.ticks.get(e.at) || st.ticks.set(e.at, []).get(e.at)).push(ms(e.time));
+      if (inView(e)) { const body = el(st, `.block[data-at="${CSS.escape(e.at)}"] .body`); if (body) body.textContent = bodyOf(b); redrawDrawer(); }
     },
     "block.ended"(e, st) {
       const i = st.blocks.findIndex((x) => x.at === e.at);
       if (i >= 0) st.blocks[i] = e.block; else st.blocks.push(e.block);
-      if (inView(e)) { if (mode !== "cards") redrawTree(); else { const node = el(st, `.block[data-at="${CSS.escape(e.at)}"]`); if (node) node.outerHTML = drawBlock(e.block, st); } }
+      if (inView(e)) { const n = el(st, `.block[data-at="${CSS.escape(e.at)}"]`); if (n) n.outerHTML = drawBlock(e.block, st); tickWire(); redrawDrawer(); }
     },
     "stream.ended"(e, st) {
-      Object.assign(st, e.snapshot, {blocks: st.blocks, request: st.request});
+      Object.assign(st, e.snapshot, {blocks: st.blocks, request: st.request, ticks: st.ticks});
       const s = session(e.agent, e.session, st.started);
       if ([...s.streams.values()].every((x) => x.ended)) s.ended = st.ended;
       if (st.interrupted) s.interrupted += 1;
-      if (inView(e)) { drawTitle(); if (mode !== "cards") redrawTree(); else { const node = document.getElementById(`st-${st.id}`); if (node) node.outerHTML = drawStream(st); } }
+      if (inView(e)) { drawTitle(); const n = document.getElementById(`st-${st.id}`); if (n) n.outerHTML = drawStream(st); tickWire(); redrawDrawer(); }
       drawNav();
     },
-    "killswitch"(e) { applySwitches(e.state); drawNav(); drawTitle(); if (mode !== "cards") redrawTree(); },
+    "killswitch"(e) { applySwitches(e.state); drawNav(); drawTitle(); },
   };
   function apply(e) {
+    if (e.time) skew = ms(e.time) - Date.now();
     if (e.type === "killswitch") { handlers.killswitch(e); return; }
     const st = agents.get(e.agent)?.sessions.get(e.session)?.streams.get(e.stream);
-    if (e.type !== "stream.started" && !st) return;      // a stream that began before we were watching: the snapshot has it
+    if (e.type !== "stream.started" && !st) return;
     handlers[e.type]?.(e, st);
     if (e.type === "stream.started") drawNav();
   }
@@ -469,11 +508,10 @@
     dot.className = "dot";
     try {
       const list = await api("/v1/agents");
-      agents.clear(); selected = null;
+      agents.clear(); selected = null; picked = null;
       for (const a of list.data) {
         const detail = await api(`/v1/agents/${encodeURIComponent(a.agent)}`);
-        const entry = agent(a.agent);
-        entry.killswitch = detail.killswitch;
+        agent(a.agent).killswitch = detail.killswitch;
         for (const s of detail.sessions) Object.assign(session(a.agent, s.session, s.started), {ended: s.ended, count: s.streams, interrupted: s.interrupted, killswitch: s.killswitch});
       }
       operator = (await api("/v1/me")).operator;
@@ -488,6 +526,7 @@
     const first = [...agents.values()].flatMap((a) => [...a.sessions.values()]).sort((x, y) => (y.started || "").localeCompare(x.started || ""))[0];
     if (first) select(first.agent, first.session);
   }
+  window.addEventListener("resize", tickWire);
   $("connect").onclick = connect;
   keyInput.addEventListener("keydown", (e) => { if (e.key === "Enter") connect(); });
   try { keyInput.value = localStorage.getItem("mi-key") || ""; } catch (_) {}

@@ -123,7 +123,7 @@ class Record:
 
     def announce(self, kind: str, agent: str | None = None, session: str | None = None, **payload):
         """One event, to everyone watching its session, its agent, or everything."""
-        event = {"type": kind, "at": iso(time.time()), "agent": agent, "session": session,
+        event = {"type": kind, "time": iso(time.time()), "agent": agent, "session": session,
                  **{k: stamped(v) if isinstance(v, dict) else v for k, v in payload.items()}}
         scopes = ["*"] + ([agent] if agent else []) + ([f"{agent}/{session}"] if agent and session else [])
         for scope in scopes:

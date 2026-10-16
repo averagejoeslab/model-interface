@@ -96,7 +96,7 @@ Feeds publish the record's own events as server-sent events, at three scopes:
 | `GET /v1/agents/{agent}/live` | one agent |
 | `GET /v1/agents/{agent}/sessions/{session}/live` | one session |
 
-Every event names its `type`, `at`, `agent`, `session` and, for stream events, `stream`, by id, and carries its payload under its own key:
+Every event names its `type`, the `time` it was published, `agent`, `session` and, for stream events, `stream`, by id, and carries its payload under its own key:
 
 | Event | Carries |
 |---|---|
