@@ -103,7 +103,7 @@ text.contains("rm -rf")                                on an agent, when = strea
 response.usage.output_tokens > 4000                    anywhere, when = response, action = alert
 ```
 
-The rules run in the loop, on the hot path: the line a stream rule fires on is the last line the caller receives.
+The rules run in the loop, on the hot path: the line a stream rule fires on is the last line the caller receives. The rules of a moment are evaluated together on a thread pool and reported in order, so a moment costs the slowest rule, not the sum. CEL in pure Python holds the interpreter lock while it evaluates, so for rules that only compute, the gain is small; the gain is real once rules wait on anything outside the process.
 
 ## The killswitch
 
@@ -111,7 +111,7 @@ A state at three levels with the reason it was set: a rule's name, or `operator`
 
 ## The page
 
-`GET /` serves a page on the feed: agents and sessions with their switches; for a session, the wire, a strip chart of its streams on its clock with pieces as segments, deltas as ticks, cuts and refusals marked; the transcript, each stream as it reads; and the record, the exact document as nested nodes growing in place.
+`GET /` serves a page on the feed: agents and sessions with their switches; for a session, the wire, a strip chart of its streams on its clock with pieces as segments, deltas as ticks, cuts and refusals marked; the transcript, each stream as it reads; and the structure, the session as the record holds it: every stream with its door, provider, model and how it stopped; its request, with the system prompt in view; its response, marked where a rule closed the connection and on which block; and a refused request marked with the rule that refused it and that no connection was opened. Nodes fold and unfold, the open piece is followed, and the whole comes back from the record on reload.
 
 ## Configuration
 

@@ -10,7 +10,7 @@ POST /v1/messages ───────────► who? where? request rules
 POST /v1/chat/completions ───► the same ───────────────────────────────── openai SDK ────► any root URL
                                │  each line: tap · stream rules · switches · forward verbatim
                                ▼
-GET /                          the page: the wire, the transcript, the record, live
+GET /                          the page: the wire, the transcript, the structure, live
 GET /v1/live                   the record's events as they happen
 PUT /v1/killswitch             by hand; /v1/agents/{a}/killswitch; /v1/agents/{a}/sessions/{s}/killswitch
 ```

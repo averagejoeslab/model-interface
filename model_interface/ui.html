@@ -73,9 +73,16 @@
   .wire .legend { display: flex; gap: 14px; font-size: 11px; color: var(--muted); padding: 2px 2px 4px; }
   .wire .legend i { display: inline-block; width: 10px; height: 10px; border-radius: 2px; margin-right: 4px; vertical-align: -1px; }
   .split { flex: 1; display: grid; grid-template-columns: 1fr; min-height: 0; margin: 0 20px 16px; gap: 14px; }
-  .split.with-drawer { grid-template-columns: 1fr minmax(360px, 42%); }
   .transcript { overflow: auto; min-height: 0; }
-  .drawer { overflow: auto; min-height: 0; }
+  .modes { display: flex; border: 1px solid var(--line); border-radius: 8px; overflow: hidden; }
+  .modes button { border: 0; border-radius: 0; padding: 4px 10px; font-size: 12px; background: var(--panel); color: var(--muted); }
+  .modes button.active { background: var(--accent-soft); color: var(--text); }
+  .structure .status { font-size: 11px; padding: 1px 7px; border-radius: 999px; border: 1px solid var(--line); color: var(--muted); font-family: system-ui, sans-serif; }
+  .structure .status.cut { color: #fff; background: var(--bad); border-color: var(--bad); }
+  .structure .status.live { color: var(--live); border-color: var(--live); }
+  .structure .status.alert { color: var(--live); border-color: var(--live); }
+  .structure .summary { color: var(--muted); font-size: 11.5px; }
+  .structure .cutmark { color: var(--bad); font-weight: 600; font-family: system-ui, sans-serif; font-size: 11px; }
   /* the transcript: the session as it reads, each stream a card, pieces growing inside it */
   .stream { background: var(--panel); border: 1px solid var(--line); border-radius: 12px; margin-bottom: 14px; overflow: hidden; }
   .stream.running { border-color: var(--live); }
@@ -130,7 +137,7 @@
   @keyframes fade { to { background: transparent; } }
   .hint { color: var(--muted); max-width: 560px; padding: 16px 20px; }
   .hint code { font-family: var(--mono); background: var(--panel); border: 1px solid var(--line); padding: 1px 5px; border-radius: 5px; }
-  @media (max-width: 900px) { main { grid-template-columns: 1fr; } nav { max-height: 200px; border-right: 0; border-bottom: 1px solid var(--line); } input { width: 120px; } .split.with-drawer { grid-template-columns: 1fr; } }
+  @media (max-width: 900px) { main { grid-template-columns: 1fr; } nav { max-height: 200px; border-right: 0; border-bottom: 1px solid var(--line); } input { width: 120px; } }
 </style>
 </head>
 <body>
@@ -157,7 +164,8 @@
   const agents = new Map();          // name -> {agent, killswitch, sessions: Map(id -> session)}
   let selected = null, source = null, operator = false, gatewaySwitch = null;   // the gateway switch holds its reason when on
   let picked = null;                 // {stream, at} the piece the viewer clicked on the wire, or null
-  let drawerOpen = false;
+  let mode = "transcript";           // or "structure": the session as nested nodes, every stream, request and response
+  try { mode = localStorage.getItem("mi-mode") || "transcript"; } catch (_) {}
   let skew = 0;                      // server clock minus this clock, from the feed's own timestamps
   const $ = (id) => document.getElementById(id);
   const nav = $("nav"), view = $("view"), dot = $("dot"), keyInput = $("key"), gwSwitch = $("gw-switch");
@@ -278,8 +286,9 @@
     drawSession();
   }
   function title(s) {
+    const modes = ["transcript", "structure"].map((m) => `<button class="small${mode === m ? " active" : ""}" data-mode="${m}">${m}</button>`).join("");
     return `<h2>${esc(s.agent)} / ${esc(s.session)}</h2><small>${s.count} stream${s.count === 1 ? "" : "s"}${s.interrupted ? ` · ${s.interrupted} cut` : ""}</small>
-      <button class="small${drawerOpen ? " active" : ""}" data-drawer>record</button>${sw(s.killswitch, "kill session", "", s.reason)}`;
+      <span class="modes">${modes}</span>${sw(s.killswitch, "kill session", "", s.reason)}`;
   }
   function drawTitle() { const s = selectedSession(); const t = view.querySelector(".title"); if (s && t) t.innerHTML = title(s); }
   function drawSession() {
@@ -287,29 +296,29 @@
     if (!s) { view.innerHTML = ""; return; }
     const tr = view.querySelector(".transcript"), top = tr ? tr.scrollTop : 0;
     view.innerHTML = `<div class="title">${title(s)}</div><div class="wire" id="wire">${drawWire(s)}</div>
-      <div class="split${drawerOpen ? " with-drawer" : ""}"><div class="transcript">${streamsOf(s).map(drawStream).join("")}</div>${drawerOpen ? `<aside class="drawer">${drawStructure(s)}</aside>` : ""}</div>`;
+      <div class="split"><div class="transcript">${mode === "structure" ? drawStructure(s) : streamsOf(s).map(drawStream).join("")}</div></div>`;
     const t = view.querySelector(".transcript");
-    t.scrollTop = top || t.scrollHeight;
+    t.scrollTop = mode === "structure" ? top : (top || t.scrollHeight);
   }
   view.addEventListener("click", (e) => {
     const m = e.target.closest(".structure .more[data-more]");
     if (m) { unfolded.add(m.dataset.more); drawSession(); return; }
     const t = e.target.closest(".structure .tog[data-path]");
-    if (t) { const p = t.dataset.path; if (isFolded(p)) { collapsed.delete(p); opened.add(p); } else { collapsed.add(p); opened.delete(p); } drawSession(); return; }
+    if (t) { const p = t.dataset.path; if (isFolded(p) || (!opened.has(p) && /^\$\.streams\.[^.]+$/.test(p) && !(picked && p.endsWith(picked.stream)))) { collapsed.delete(p); opened.add(p); } else { collapsed.add(p); opened.delete(p); } drawSession(); return; }
     const f = e.target.closest(".structure button[data-fold]");
     if (f) { fold(f.dataset.fold); drawSession(); return; }
     const seg = e.target.closest(".wire .seg[data-stream]");
     if (seg) { pick(seg.dataset.stream, seg.dataset.at); return; }
-    const d = e.target.closest("button[data-drawer]");
-    if (d) { drawerOpen = !drawerOpen; drawSession(); return; }
+    const md = e.target.closest("button[data-mode]");
+    if (md) { mode = md.dataset.mode; try { localStorage.setItem("mi-mode", mode); } catch (_) {} drawSession(); return; }
     const b = e.target.closest("button.switch");
     if (b && selected) flip(selected.agent, selected.session, !selectedSession().killswitch);
   });
   function pick(streamId, at) {
     picked = picked && picked.stream === streamId && picked.at === at ? null : {stream: streamId, at};
-    drawerOpen = drawerOpen || !!picked;
+    if (picked) { collapsed.delete(`$.streams.${streamId}`); collapsed.delete(`$.streams.${streamId}.response`); }
     drawSession();
-    const card = document.getElementById(`st-${streamId}`);
+    const card = document.getElementById(`st-${streamId}`) || document.querySelector(`.structure [data-stream-node="${CSS.escape(streamId)}"]`);
     if (card) card.scrollIntoView({block: "nearest", behavior: "smooth"});
   }
 
@@ -410,15 +419,28 @@
 
   // ── the record: the document as nested, collapsible nodes that grow in place ──
   const collapsed = new Set(), opened = new Set(), unfolded = new Set(), seen = new Map();
-  let foldRequests = true, followOpen = true;
-  const isFolded = (path) => collapsed.has(path) || (foldRequests && path.endsWith(".request") && !opened.has(path));
+  let followOpen = true;
+  const isFolded = (path) => collapsed.has(path) || (!opened.has(path) && (/^\$\.streams\.[^.]+(\.request)?$/.test(path)));
   const isObj = (v) => v && typeof v === "object";
   function docOf(s) {
-    const st = picked && s.streams.get(picked.stream);
-    const one = (x) => ({id: x.id, started: x.started, ended: x.ended, provider: x.provider, model: x.model, format: x.format,
-                         request: x.request, response: composeResponse(x, true), interrupted: x.interrupted, error: x.error});
-    if (st) return {agent: s.agent, session: s.session, stream: one(st)};
-    return {agent: s.agent, session: s.session, started: s.started, ended: s.ended, killswitch: s.killswitch, streams: streamsOf(s).map(one)};
+    const one = (x) => ({id: x.id, started: x.started, ended: x.ended, door: x.door, provider: x.provider, model: x.model,
+                         request: x.request, response: composeResponse(x, true), refused: x.refused, interrupted: x.interrupted, alerts: x.alerts || [], error: x.error});
+    const streams = {};
+    for (const st of streamsOf(s)) streams[st.id] = one(st);
+    return {agent: s.agent, session: s.session, started: s.started, ended: s.ended, killswitch: s.killswitch, streams};
+  }
+  function streamStatus(x) {                      // what the stream's row says before you open it
+    if (x.refused) return `<span class="status cut">refused · ${esc(x.refused.by)} · ${esc(x.refused.reason)}</span>`;
+    if (x.interrupted) return `<span class="status cut">cut · ${esc(x.interrupted.by)} · ${esc(x.interrupted.reason)} · at ${esc(x.interrupted.block ? x.interrupted.block.at : "the head")}</span>`;
+    if (!x.ended) return `<span class="status live">streaming</span>`;
+    const r = x.response || {}, end = r.stop_reason || (r.choices && r.choices[0] && r.choices[0].finish_reason) || "";
+    return `<span class="status">${esc(end || "ended")}</span>`;
+  }
+  function requestSummary(req) {
+    const sys = typeof req.system === "string" ? req.system : Array.isArray(req.system) ? req.system.map((x) => x.text || "").join(" ") : (req.messages || []).find((m) => m.role === "system")?.content;
+    const parts = [sys ? `system: "${esc(String(sys).slice(0, 60))}${String(sys).length > 60 ? "…" : ""}"` : "no system prompt",
+                   `${(req.messages || []).length} message${(req.messages || []).length === 1 ? "" : "s"}`, req.tools ? `${req.tools.length} tool${req.tools.length === 1 ? "" : "s"}` : ""].filter(Boolean);
+    return `<span class="summary">${parts.join(" · ")}</span>`;
   }
   function leaf(v, path, live) {
     if (typeof v === "string") {
@@ -428,18 +450,27 @@
     if (v === null || v === undefined) return `<span class="z">null</span>`;
     return `<span class="${typeof v === "boolean" ? "b" : "n"}">${esc(String(v))}</span>`;
   }
-  function node(key, v, path, inOpen, fresh) {
+  function node(key, v, path, inOpen, fresh, ctx) {
     const changed = fresh.has(path);
     if (!isObj(v)) {
       seen.set(path, JSON.stringify(v));
       return `<div class="row"><span class="tog"></span><span class="k">${esc(key)}</span>: <span class="${changed ? "fresh" : ""}">${leaf(v, path, inOpen)}</span></div>`;
     }
     const entries = Array.isArray(v) ? v.map((x, i) => [i, x]) : Object.entries(v);
-    const folded = isFolded(path);
+    const isStream = /^\$\.streams\.[^.]+$/.test(path), isRequest = /^\$\.streams\.[^.]+\.request$/.test(path);
+    const folded = collapsed.has(path) || (!opened.has(path) && (isRequest || (isStream && !(picked && picked.stream === v.id))));
     const meta = Array.isArray(v) ? `[${entries.length}]` : `{${entries.length}}`;
     const live = !Array.isArray(v) && "at" in v && v.ended === null;
-    return `<div class="node${live ? " open-piece" : ""}"><div class="row"><span class="tog" data-path="${esc(path)}">${folded ? "▸" : "▾"}</span><span class="k">${esc(key)}</span><span class="meta">${meta}${live ? " · open" : ""}</span></div>` +
-      (folded ? "" : `<div class="children">${entries.map(([k, x]) => node(String(k), x, `${path}.${k}`, inOpen || live, fresh)).join("")}</div>`) + `</div>`;
+    const stream = isStream ? v : ctx;
+    const cutHere = stream && stream.interrupted && stream.interrupted.block && !Array.isArray(v) && v.at === stream.interrupted.block.at;
+    let label = esc(key);
+    if (isStream) label = `${esc(v.id)} <span class="summary">${esc(v.door)} · ${esc(v.provider)}/${esc(v.model)} · ${clock(v.started)}</span> ${streamStatus(v)}` + ((v.alerts || []).length ? ` <span class="status alert">${v.alerts.length} alert${v.alerts.length === 1 ? "" : "s"}</span>` : "");
+    if (isRequest) label += ` ${requestSummary(v)}` + (stream && stream.refused ? ` <span class="cutmark">refused by ${esc(stream.refused.reason)}: no connection was opened</span>` : "");
+    if (/\.response$/.test(path) && stream && stream.refused) label += ` <span class="summary">none</span>`;
+    if (/\.response$/.test(path) && stream && stream.interrupted) label += ` <span class="cutmark">✂ connection closed by ${esc(stream.interrupted.reason)} at ${clock(stream.interrupted.at)}</span>`;
+    if (cutHere) label += ` <span class="cutmark">✂ cut here</span>`;
+    return `<div class="node${live ? " open-piece" : ""}"${isStream ? ` data-stream-node="${esc(v.id)}"` : ""}><div class="row"><span class="tog" data-path="${esc(path)}">${folded ? "▸" : "▾"}</span><span class="k">${label}</span><span class="meta">${meta}${live ? " · open" : ""}</span></div>` +
+      (folded ? "" : `<div class="children">${entries.map(([k, x]) => node(String(k), x, `${path}.${k}`, inOpen || live, fresh, stream)).join("")}</div>`) + `</div>`;
   }
   function drawStructure(s) {
     const doc = docOf(s), fresh = new Set();
@@ -447,23 +478,22 @@
       if (!isObj(v)) { if (seen.has(path) && seen.get(path) !== JSON.stringify(v)) fresh.add(path); return; }
       for (const [k, x] of Array.isArray(v) ? v.map((x, i) => [i, x]) : Object.entries(v)) walk(x, `${path}.${k}`);
     })(doc, "$");
-    return `<div class="structure"><div class="bar"><span>${picked ? "the picked stream" : "the session"}, as the record holds it</span>
-      <button data-fold="all">collapse all</button><button data-fold="none">expand all</button><button data-fold="requests">${foldRequests ? "show" : "fold"} requests</button><button data-fold="follow">${followOpen ? "stop following" : "follow growth"}</button></div>` +
-      node(picked ? "stream" : "session", doc, "$", false, fresh) + `</div>`;
+    return `<div class="structure"><div class="bar"><span>the session as the record holds it: every stream, its request, its response, and where it stopped</span>
+      <button data-fold="all">collapse all</button><button data-fold="none">expand all</button><button data-fold="follow">${followOpen ? "stop following" : "follow growth"}</button></div>` +
+      node("session", doc, "$", false, fresh, null) + `</div>`;
   }
   function fold(what) {
     if (what === "all") { collapsed.clear(); (function f(v, path) { if (!isObj(v)) return; if (path !== "$") collapsed.add(path); for (const [k, x] of Array.isArray(v) ? v.map((x, i) => [i, x]) : Object.entries(v)) f(x, `${path}.${k}`); })(docOf(selectedSession()), "$"); }
-    if (what === "none") { collapsed.clear(); opened.clear(); foldRequests = false; }
-    if (what === "requests") foldRequests = !foldRequests;
+    if (what === "none") { collapsed.clear(); (function f(v, path) { if (!isObj(v)) return; opened.add(path); for (const [k, x] of Array.isArray(v) ? v.map((x, i) => [i, x]) : Object.entries(v)) f(x, `${path}.${k}`); })(docOf(selectedSession()), "$"); }
     if (what === "follow") followOpen = !followOpen;
   }
   let drawerPending = false;
-  function redrawDrawer() {
-    if (!drawerOpen || drawerPending) return;
+  function redrawDrawer() {                       // in structure mode, live events redraw the tree whole, at most once a frame
+    if (mode !== "structure" || drawerPending) return;
     drawerPending = true;
     requestAnimationFrame(() => {
       drawerPending = false;
-      const s = selectedSession(), d = view.querySelector(".drawer");
+      const s = selectedSession(), d = view.querySelector(".transcript");
       if (s && d) { d.innerHTML = drawStructure(s); if (followOpen) { const o = d.querySelector(".open-piece"); if (o) o.scrollIntoView({block: "nearest"}); } }
     });
   }
@@ -476,34 +506,34 @@
       const st = {...e.snapshot, blocks: [], alerts: [], ticks: new Map()};
       s.streams.set(st.id, st); s.count += 1; s.ended = null;
       if (!selected) { select(e.agent, e.session); return; }
-      if (inView(e)) { drawTitle(); const t = view.querySelector(".transcript"); if (t) { t.insertAdjacentHTML("beforeend", drawStream(st)); t.scrollTop = t.scrollHeight; } keepWireMoving(); tickWire(); redrawDrawer(); }
+      if (inView(e)) { drawTitle(); if (mode !== "structure") { const t = view.querySelector(".transcript"); if (t) { t.insertAdjacentHTML("beforeend", drawStream(st)); t.scrollTop = t.scrollHeight; } } keepWireMoving(); tickWire(); redrawDrawer(); }
     },
     "stream.response"(e, st) { merge(st.response ||= {}, structuredClone(e.response)); if (inView(e)) redrawDrawer(); },
     "block.started"(e, st) {
       st.blocks.push(e.block); st.ticks.set(e.at, [ms(e.time)]);
-      if (inView(e)) { const box = el(st, ".blocks"); if (box) box.insertAdjacentHTML("beforeend", drawBlock(e.block, st)); const t = view.querySelector(".transcript"); if (t) t.scrollTop = t.scrollHeight; tickWire(); redrawDrawer(); }
+      if (inView(e)) { if (mode !== "structure") { const box = el(st, ".blocks"); if (box) box.insertAdjacentHTML("beforeend", drawBlock(e.block, st)); const t = view.querySelector(".transcript"); if (t) t.scrollTop = t.scrollHeight; } tickWire(); redrawDrawer(); }
     },
     "block.delta"(e, st) {
       const b = st.blocks.find((x) => x.at === e.at); if (!b) return;
       merge(b, e.delta); (st.ticks.get(e.at) || st.ticks.set(e.at, []).get(e.at)).push(ms(e.time));
-      if (inView(e)) { const body = el(st, `.block[data-at="${CSS.escape(e.at)}"] .body`); if (body) body.textContent = bodyOf(b); redrawDrawer(); }
+      if (inView(e)) { if (mode !== "structure") { const body = el(st, `.block[data-at="${CSS.escape(e.at)}"] .body`); if (body) body.textContent = bodyOf(b); } redrawDrawer(); }
     },
     "block.ended"(e, st) {
       const i = st.blocks.findIndex((x) => x.at === e.at);
       if (i >= 0) st.blocks[i] = e.block; else st.blocks.push(e.block);
-      if (inView(e)) { const n = el(st, `.block[data-at="${CSS.escape(e.at)}"]`); if (n) n.outerHTML = drawBlock(e.block, st); tickWire(); redrawDrawer(); }
+      if (inView(e)) { if (mode !== "structure") { const n = el(st, `.block[data-at="${CSS.escape(e.at)}"]`); if (n) n.outerHTML = drawBlock(e.block, st); } tickWire(); redrawDrawer(); }
     },
     "stream.ended"(e, st) {
       Object.assign(st, e.snapshot, {blocks: st.blocks, request: st.request, ticks: st.ticks});
       if (st.refused || st.interrupted) s_count_cut(e);
       const s = session(e.agent, e.session, st.started);
       if ([...s.streams.values()].every((x) => x.ended)) s.ended = st.ended;
-      if (inView(e)) { drawTitle(); const n = document.getElementById(`st-${st.id}`); if (n) n.outerHTML = drawStream(st); tickWire(); redrawDrawer(); }
+      if (inView(e)) { drawTitle(); if (mode !== "structure") { const n = document.getElementById(`st-${st.id}`); if (n) n.outerHTML = drawStream(st); } tickWire(); redrawDrawer(); }
       drawNav();
     },
     "rule.fired"(e, st) {
       if (e.action === "alert") (st.alerts ||= []).push({rule: e.rule, when: e.when, at: e.time});
-      if (inView(e)) { const n = document.getElementById(`st-${st.id}`); if (n) n.outerHTML = drawStream(st); }
+      if (inView(e)) { if (mode !== "structure") { const n = document.getElementById(`st-${st.id}`); if (n) n.outerHTML = drawStream(st); } redrawDrawer(); }
     },
     "killswitch"(e) { applySwitches(e.state); drawNav(); drawTitle(); },
   };

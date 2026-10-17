@@ -66,3 +66,22 @@ def test_the_file_is_loaded_with_secrets_from_the_environment(tmp_path, monkeypa
     assert c.agent_of("ck").name == "coder" and c.agent_of("plain-second-key").name == "coder" and c.agent_of("") is None
     assert [(r.name, r.on, r.when, r.action, r.trip) for r in c.rules] == [
         ("coder stays on small models", "coder", "request", "trip", "session"), ("no keys anywhere", "gateway", "stream", "alert", "agent")]
+
+
+def test_the_rules_at_a_moment_run_together_and_report_in_order():
+    import time
+    from model_interface.doors import DOORS
+    from model_interface.record import Stream
+    from model_interface.rules import Rules
+    rules = [Rule(f"r{i}", f'text.contains("needle") && size(text) > {i}', when="request") for i in range(12)]
+    rules.append(Rule("never", "model == \"nope\"", when="request"))
+    stream = Stream(agent="a", session="s", door=DOORS["messages"], provider="p", model="m", request={"system": "x" * 2000 + " needle", "messages": []})
+    t0 = time.perf_counter()
+    fired = Rules(rules).fired(stream, "request")
+    together = time.perf_counter() - t0
+    assert [r.name for r in fired] == [f"r{i}" for i in range(12)]
+    t0 = time.perf_counter()
+    view = Rules.view(stream, "request")
+    [r.fires(view) for r in rules]
+    one_by_one = time.perf_counter() - t0
+    assert together < one_by_one * 3, "running together must not cost more than a small overhead over running one by one"

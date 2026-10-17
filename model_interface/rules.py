@@ -11,6 +11,7 @@ the session. No rule reaches the gateway level: that switch is for people.
 A rule sees: agent, session, provider, model, door, request, response (as composed so far), piece (the
 one still open, or null), and text, every string anywhere in what the moment is about, joined.
 """
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
 
 import celpy
@@ -55,8 +56,12 @@ class Rule:
 
 
 class Rules:
-    def __init__(self, rules: list[Rule] = ()):
+    """The rules at a moment run at the same time, each on its own thread, so a moment costs the slowest rule,
+    not the sum of them. Compiled programs are shared between threads; evaluation keeps no state."""
+
+    def __init__(self, rules: list[Rule] = (), workers: int = 16):
         self.rules = list(rules)
+        self.pool = ThreadPoolExecutor(max_workers=workers, thread_name_prefix="rule")
 
     def at(self, when: str, agent: str) -> list[Rule]:
         """The rules that run at a moment for a stream of this agent: the gateway's, then the agent's own."""
@@ -77,4 +82,7 @@ class Rules:
         if not rules:
             return []
         view = self.view(stream, when)
-        return [r for r in rules if r.fires(view)]
+        if len(rules) == 1:
+            return rules if rules[0].fires(view) else []
+        hits = list(self.pool.map(lambda r: r.fires(view), rules))
+        return [r for r, hit in zip(rules, hits) if hit]
