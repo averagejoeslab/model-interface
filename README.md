@@ -1,6 +1,6 @@
 # model-interface
 
-A model gateway that taps the wire. The full definition is in [SPEC.md](SPEC.md).
+A model gateway that taps the wire. The full definition is in [SPEC.md](SPEC.md); [WALKTHROUGH.md](WALKTHROUGH.md) walks through deploying it, configuring providers, agents and rules, testing rules, and using the killswitch.
 
 Configure providers, create agents, author rules. An agent points its SDK at the gateway with its virtual key and names its model as `provider/model`. The gateway passes the call through verbatim, by the SDK the agent chose by its door, reads every line of the response into a record by shape as it streams, runs the rules in that loop, and can stop any of it at the gateway, an agent or a session.
 
