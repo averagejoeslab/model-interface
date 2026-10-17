@@ -1,4 +1,4 @@
-"""The endpoints: one per format, streaming only; the record, read and live; the killswitch; and the page."""
+"""The endpoints: two doors, streaming only; the record, read and live; the switches; the page."""
 import itertools
 import json
 import pathlib
@@ -9,36 +9,35 @@ from fastapi import Depends, FastAPI, Header, HTTPException, Query, Request
 from fastapi.responses import FileResponse, JSONResponse, StreamingResponse
 
 from .config import Config
-from .formats import FORMATS, Format
-from .gateway import Gateway, Record, Stream
+from .doors import DOORS, Door
+from .gateway import Gateway, Refused
 from .killswitch import Killswitch
 from .providers import Agent
+from .record import Record
+from .rules import Rules
 
 SESSION = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,63}")
 UI = pathlib.Path(__file__).with_name("ui.html")
-ALL = "*"                                  # the operator's view: every agent
+ALL = "*"
 
 
 def create_app(config: Config, gateway: Gateway | None = None) -> FastAPI:
     app = FastAPI(title="model-interface")
-    gateway = gateway or Gateway(Record(config.record), Killswitch())
+    gateway = gateway or Gateway(config.providers, Record(config.record), Killswitch(), Rules(config.rules))
     record, killswitch = gateway.record, gateway.killswitch
 
     # ── who is asking ────────────────────────────────────────────────────────
 
     def presented(x_api_key: str = Header(""), authorization: str = Header(""), key: str = Query("")) -> str:
-        """The key, as a header or as ?key= for the browser's event source."""
         return x_api_key or authorization.removeprefix("Bearer ").strip() or key
 
     def agent(key: str = Depends(presented)) -> Agent:
-        """An agent, by its key: the only identity that may call a model."""
         a = config.agent_of(key)
         if a is None:
             raise HTTPException(401, "unknown agent key")
         return a
 
     def viewer(key: str = Depends(presented)) -> str:
-        """Who may read the record: the operator sees every agent, an agent sees itself."""
         if config.admin and key == config.admin:
             return ALL
         a = config.agent_of(key)
@@ -62,56 +61,50 @@ def create_app(config: Config, gateway: Gateway | None = None) -> FastAPI:
     def me(who: str = Depends(viewer)):
         return {"operator": who == ALL, "agent": None if who == ALL else who}
 
-    # ── the two endpoints ────────────────────────────────────────────────────
+    # ── the two doors ────────────────────────────────────────────────────────
 
-    def serve(format: Format, body: dict, a: Agent, session: str, headers: dict):
+    def serve(door: Door, body: dict, a: Agent, session: str, headers: dict):
         if not body.get("stream"):
             raise HTTPException(400, "this gateway streams only: send stream=true")
         if not SESSION.fullmatch(session):
             raise HTTPException(400, "X-Session must be letters, digits, dots, dashes or underscores")
-        model = a.resolve(format, body.get("model", ""))
-        if model is None:
-            elsewhere = a.granted(body.get("model", ""))
-            if elsewhere:
-                raise HTTPException(400, f"{body['model']!r} is granted to {a.name!r} on {elsewhere[0].format.name}; use {elsewhere[0].format.endpoint}")
-            raise HTTPException(404, f"{body.get('model')!r} is not a model agent {a.name!r} may use on {format.endpoint}")
-        stream = Stream(agent=a.name, session=session, model=model, request=body)
+        try:
+            stream = gateway.open(a.name, session, door, body)
+        except Refused as r:
+            return JSONResponse({"error": r.error}, status_code=r.status)
         lines = gateway.stream(stream, headers)
         try:
             first = next(lines)                        # the provider's refusal, if any, surfaces here
         except StopIteration:
             raise HTTPException(502, "the provider sent nothing")
         except Exception as e:
-            status = format.status_of(e)
+            status = door.status_of(e)
             if status:
                 return JSONResponse(status[1], status_code=status[0])
             raise HTTPException(502, f"the provider failed: {e}")
         return StreamingResponse(itertools.chain([first], lines), media_type="text/event-stream",
                                  headers={"X-Stream": stream.id, "X-Session": session, "X-Agent": a.name})
 
-    def refused(level: str, a: Agent, session: str):
-        where = {"gateway": "the whole gateway", "agent": f"agent {a.name!r}", "session": f"session {session!r} of agent {a.name!r}"}[level]
-        return JSONResponse({"error": {"type": "killswitch", "level": level, "message": f"the killswitch is on for {where}"}}, status_code=423)
-
     @app.post("/v1/messages")
     def messages(body: dict, request: Request, a: Agent = Depends(agent), x_session: str = Header("default")):
-        level = killswitch.scope_of(a.name, x_session)
-        return refused(level, a, x_session) if level else serve(FORMATS["anthropic"], body, a, x_session, dict(request.headers))
+        return serve(DOORS["messages"], body, a, x_session, dict(request.headers))
 
     @app.post("/v1/chat/completions")
     def chat_completions(body: dict, request: Request, a: Agent = Depends(agent), x_session: str = Header("default")):
-        level = killswitch.scope_of(a.name, x_session)
-        return refused(level, a, x_session) if level else serve(FORMATS["openai"], body, a, x_session, dict(request.headers))
+        return serve(DOORS["chat"], body, a, x_session, dict(request.headers))
 
-    @app.get("/v1/models")
-    def models(who: str = Depends(viewer)):
-        """The models an agent may use, in the list shape both SDKs expect; everything, for the operator."""
-        agents = config.agents.values() if who == ALL else [config.agents[who]]
-        seen = {m.id: m for a in agents for m in a.models}
-        return {"object": "list", "data": [{"id": m.name, "object": "model", "provider": m.provider.name, "format": m.format.name,
-                                            "endpoint": m.format.endpoint} for m in seen.values()]}
+    # ── what is configured ───────────────────────────────────────────────────
 
-    # ── the record: agents, sessions, streams, blocks ────────────────────────
+    @app.get("/v1/providers")
+    def providers(who: str = Depends(viewer)):
+        return {"data": [{"provider": p.name, "url": p.url} for p in config.providers.values()]}
+
+    @app.get("/v1/rules")
+    def rules(who: str = Depends(viewer)):
+        return {"data": [{"name": r.name, "on": r.on, "when": r.when, "action": r.action, "trip": r.trip, "expr": r.expr}
+                         for r in config.rules if who == ALL or r.on in ("gateway", who)]}
+
+    # ── the record: agents, sessions, streams, pieces ────────────────────────
 
     def with_switch(summary: dict) -> dict:
         return {**summary, "killswitch": killswitch.is_on(summary["agent"], summary.get("session"))}
@@ -124,8 +117,7 @@ def create_app(config: Config, gateway: Gateway | None = None) -> FastAPI:
     @app.get("/v1/agents/{name}")
     def agent_detail(name: str, who: str = Depends(viewer)):
         a = visible(who, name)
-        return {"agent": a.name, "killswitch": killswitch.is_on(a.name), "models": [m.id for m in a.models],
-                "sessions": [with_switch(s) for s in record.list(a.name)]}
+        return {"agent": a.name, "killswitch": killswitch.is_on(a.name), "sessions": [with_switch(s) for s in record.list(a.name)]}
 
     @app.get("/v1/agents/{name}/sessions/{session}")
     def session_detail(name: str, session: str, blocks: bool = True, who: str = Depends(viewer)):

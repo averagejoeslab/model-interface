@@ -10,9 +10,11 @@ from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse, StreamingResponse
 
 from model_interface.config import Config
-from model_interface.gateway import Gateway, Record
+from model_interface.gateway import Gateway
 from model_interface.killswitch import Killswitch
 from model_interface.providers import Agent, Provider
+from model_interface.record import Record
+from model_interface.rules import Rule, Rules
 from model_interface.server import create_app
 
 
@@ -62,10 +64,9 @@ class FakeProvider:
         stop = "end_turn"
         if self.tool:
             args = json.dumps(self.tool[1])
-            events += [{"type": "content_block_start", "index": i + 1, "content_block": {"type": "tool_use", "id": "t1", "name": self.tool[0], "input": {}}},
-                       {"type": "content_block_delta", "index": i + 1, "delta": {"type": "input_json_delta", "partial_json": args[:6]}},
-                       {"type": "content_block_delta", "index": i + 1, "delta": {"type": "input_json_delta", "partial_json": args[6:]}},
-                       {"type": "content_block_stop", "index": i + 1}]
+            events += [{"type": "content_block_start", "index": i + 1, "content_block": {"type": "tool_use", "id": "t1", "name": self.tool[0], "input": {}}}]
+            events += [{"type": "content_block_delta", "index": i + 1, "delta": {"type": "input_json_delta", "partial_json": args[n:n + 7]}} for n in range(0, len(args), 7)]
+            events += [{"type": "content_block_stop", "index": i + 1}]
             stop = "tool_use"
         events += [{"type": "message_delta", "delta": {"stop_reason": stop, "stop_sequence": None}, "usage": {"output_tokens": 7}}, {"type": "message_stop"}]
         return StreamingResponse(self.emit([f"event: {e['type']}\ndata: {json.dumps(e)}\n\n" for e in events]), media_type="text/event-stream")
@@ -83,9 +84,8 @@ class FakeProvider:
         finish = "stop"
         if self.tool:
             args = json.dumps(self.tool[1])
-            chunks += [{**head, "choices": [{"index": 0, "delta": {"tool_calls": [{"index": 0, "id": "call_1", "type": "function", "function": {"name": self.tool[0], "arguments": ""}}]}, "finish_reason": None}]},
-                       {**head, "choices": [{"index": 0, "delta": {"tool_calls": [{"index": 0, "function": {"arguments": args[:6]}}]}, "finish_reason": None}]},
-                       {**head, "choices": [{"index": 0, "delta": {"tool_calls": [{"index": 0, "function": {"arguments": args[6:]}}]}, "finish_reason": None}]}]
+            chunks += [{**head, "choices": [{"index": 0, "delta": {"tool_calls": [{"index": 0, "id": "call_1", "type": "function", "function": {"name": self.tool[0], "arguments": ""}}]}, "finish_reason": None}]}]
+            chunks += [{**head, "choices": [{"index": 0, "delta": {"tool_calls": [{"index": 0, "function": {"arguments": args[n:n + 7]}}]}, "finish_reason": None}]} for n in range(0, len(args), 7)]
             finish = "tool_calls"
         chunks += [{**head, "choices": [{"index": 0, "delta": {}, "finish_reason": finish}]},
                    {**head, "choices": [], "usage": {"prompt_tokens": 10, "completion_tokens": 7, "total_tokens": 17}}]
@@ -123,18 +123,19 @@ def provider(fake):
 
 @pytest.fixture
 def config(provider):
-    """Two providers, one per format, on the fake; one agent that may use both; a second agent that may use one model."""
-    anthropic = Provider("fake-anthropic", provider.url + "/v1/messages", "", ["fake-sonnet", "bad"])
-    openai = Provider("fake-openai", provider.url + "/v1/chat/completions", "", ["fake-gpt", "bad"])
-    coder = Agent("coder", ["mi-test-key"], anthropic.models + openai.models)
-    helper = Agent("helper", ["helper-key"], [openai.model("fake-gpt")])
-    return Config(providers={"fake-anthropic": anthropic, "fake-openai": openai}, agents={"coder": coder, "helper": helper},
+    """One provider that speaks both doors, a second that does too; two agents; a few rules."""
+    return Config(providers={"fake": Provider("fake", provider.url, ""), "other": Provider("other", provider.url, "")},
+                  agents={"coder": Agent("coder", ["mi-test-key"]), "helper": Agent("helper", ["helper-key"])},
+                  rules=[Rule("no secrets in requests", 'text.matches("AKIA[0-9A-Z]{16}")', when="request", on="gateway", trip="agent"),
+                         Rule("no destructive commands", 'text.contains("rm -rf")', when="stream", on="coder"),
+                         Rule("helper may only use fake-gpt", 'model != "fake-gpt"', when="request", on="helper"),
+                         Rule("long answers are noted", 'response.usage.output_tokens > 5 || response.usage.completion_tokens > 5', when="response", action="alert", on="gateway")],
                   admin="admin-key", record=None)
 
 
 @pytest.fixture
 def gateway(config):
-    return Gateway(Record(None), Killswitch())
+    return Gateway(config.providers, Record(None), Killswitch(), Rules(config.rules))
 
 
 @pytest.fixture

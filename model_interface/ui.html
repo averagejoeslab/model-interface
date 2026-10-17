@@ -88,6 +88,8 @@
   .badge { font-size: 11px; padding: 1px 7px; border-radius: 999px; border: 1px solid var(--line); color: var(--muted); }
   .badge.live { color: var(--live); border-color: var(--live); animation: pulse 1.2s infinite; }
   .badge.cut { color: #fff; background: var(--bad); border-color: var(--bad); }
+  .badge.alert { color: var(--live); border-color: var(--live); }
+  .foot .alert { color: var(--live); font-weight: 600; }
   @keyframes pulse { 50% { opacity: .45; } }
   .ask { padding: 10px 14px; color: var(--muted); font-size: 13px; border-bottom: 1px solid var(--line); white-space: pre-wrap; max-height: 120px; overflow: auto; }
   .ask b { color: var(--text); font-weight: 600; margin-right: 6px; }
@@ -145,7 +147,7 @@
   <section id="view">
     <div class="hint">
       <p>Every call that passes through the gateway is tapped as it flows. Pick a session: the wire at the top shows each stream on the session's clock, its pieces as segments and every delta as a tick; the transcript reads the session back; the record shows the exact document growing.</p>
-      <p>Point an SDK at this address with an agent key, name the model as the provider names it, add an <code>X-Session</code> header, send a call with <code>stream: true</code>, and watch.</p>
+      <p>Point an SDK at this address with an agent key, name the model as <code>provider/model</code>, add an <code>X-Session</code> header, send a call with <code>stream: true</code>, and watch. Rules run in the loop at three moments; what they trip shows here as it happens.</p>
     </div>
   </section>
 </main>
@@ -153,7 +155,7 @@
 (() => {
   // ── state: the record as this page knows it ───────────────────────────────
   const agents = new Map();          // name -> {agent, killswitch, sessions: Map(id -> session)}
-  let selected = null, source = null, operator = false, gatewaySwitch = false;
+  let selected = null, source = null, operator = false, gatewaySwitch = null;   // the gateway switch holds its reason when on
   let picked = null;                 // {stream, at} the piece the viewer clicked on the wire, or null
   let drawerOpen = false;
   let skew = 0;                      // server clock minus this clock, from the feed's own timestamps
@@ -167,7 +169,7 @@
   const serverNow = () => Date.now() + skew;
   const clock = (iso) => iso ? new Date(iso).toLocaleTimeString([], {hour12: false}) + "." + String(new Date(iso).getMilliseconds()).padStart(3, "0") : "…";
   const span = (a, b) => a && b ? ((ms(b) - ms(a)) / 1000).toFixed(2) + "s" : "";
-  const sw = (on, label, attrs) => `<button class="switch ${on ? "on" : "off"}" ${attrs} ${operator ? "" : "disabled"}>${label}: ${on ? "ON" : "off"}</button>`;
+  const sw = (on, label, attrs, reason) => `<button class="switch ${on ? "on" : "off"}" ${attrs} ${operator ? "" : "disabled"} title="${esc(on && reason ? "set by: " + reason : "")}">${label}: ${on ? "ON" + (reason && reason !== "operator" ? " · " + esc(reason) : "") : "off"}</button>`;
 
   function agent(name) {
     let a = agents.get(name);
@@ -206,9 +208,10 @@
 
   // ── the response, whole, in the provider's shape, composed from the head and the pieces ──
   function composeResponse(st, withTimes = false) {
+    if (st.refused) return null;
     const head = structuredClone(st.response || {}), blocks = st.blocks || [];
     const piece = withTimes ? (b) => Object.fromEntries(Object.entries(b).filter(([k]) => k !== "partial_json" || !b.ended)) : strip;
-    if (st.format === "anthropic") return {...head, content: blocks.map(piece)};
+    if (st.door === "messages") return {...head, content: blocks.map(piece)};
     const choices = head.choices || [{index: 0, message: {}}];
     delete head.blocks; delete head.choices;
     for (const b of blocks) {
@@ -220,18 +223,19 @@
     delete head.obfuscation;
     return {...head, object: "chat.completion", choices, ...(withTimes ? {blocks: blocks.map(piece)} : {})};
   }
-  const endOf = (st) => { const r = composeResponse(st); return r.stop_reason ? `stop_reason ${r.stop_reason}` : r.choices?.[0]?.finish_reason ? `finish_reason ${r.choices[0].finish_reason}` : ""; };
+  const endOf = (st) => { const r = composeResponse(st) || {}; return r.stop_reason ? `stop_reason ${r.stop_reason}` : r.choices?.[0]?.finish_reason ? `finish_reason ${r.choices[0].finish_reason}` : ""; };
 
   // ── the sidebar: agents, their sessions, their switches ───────────────────
   function drawNav() {
     gwSwitch.className = `switch ${gatewaySwitch ? "on" : "off"}`;
     gwSwitch.textContent = `gateway: ${gatewaySwitch ? "ON" : "off"}`;
+    gwSwitch.title = gatewaySwitch ? `set by: ${gatewaySwitch}` : "the gateway killswitch: for people only";
     gwSwitch.disabled = !operator;
     if (!agents.size) { nav.innerHTML = '<div class="empty">No agents yet.</div>'; return; }
     let html = "<h2>agents</h2>";
     for (const a of agents.values()) {
       const list = [...a.sessions.values()].sort((x, y) => (y.started || "").localeCompare(x.started || ""));
-      html += `<div class="agent${a.killswitch ? " cut" : ""}"><span class="name">${esc(a.agent)}</span><small>${list.length}</small>${sw(a.killswitch, "kill", `data-agent="${esc(a.agent)}"`)}</div>`;
+      html += `<div class="agent${a.killswitch ? " cut" : ""}"><span class="name">${esc(a.agent)}</span><small>${list.length}</small>${sw(a.killswitch, "kill", `data-agent="${esc(a.agent)}"`, a.reason)}</div>`;
       if (!list.length) html += '<div class="empty" style="padding-left:26px">no sessions yet</div>';
       for (const s of list) {
         const running = s.streams.size ? [...s.streams.values()].some((st) => !st.ended) : !s.ended;
@@ -255,9 +259,9 @@
     try { await api(path, {method: "PUT", body: JSON.stringify({on})}); } catch (status) { alert(`could not set the switch (${status})`); }
   }
   function applySwitches(state) {
-    gatewaySwitch = state.gateway;
-    for (const a of agents.values()) a.killswitch = state.agents.includes(a.agent);
-    for (const a of agents.values()) for (const s of a.sessions.values()) s.killswitch = state.sessions.some((x) => x.agent === s.agent && x.session === s.session);
+    gatewaySwitch = state.gateway || null;
+    for (const a of agents.values()) { const hit = state.agents.find((x) => x.agent === a.agent); a.killswitch = !!hit; a.reason = hit && hit.reason; }
+    for (const a of agents.values()) for (const s of a.sessions.values()) { const hit = state.sessions.find((x) => x.agent === s.agent && x.session === s.session); s.killswitch = !!hit; s.reason = hit && hit.reason; }
   }
 
   // ── the main pane: title, wire, transcript, record ────────────────────────
@@ -275,7 +279,7 @@
   }
   function title(s) {
     return `<h2>${esc(s.agent)} / ${esc(s.session)}</h2><small>${s.count} stream${s.count === 1 ? "" : "s"}${s.interrupted ? ` · ${s.interrupted} cut` : ""}</small>
-      <button class="small${drawerOpen ? " active" : ""}" data-drawer>record</button>${sw(s.killswitch, "kill session", "")}`;
+      <button class="small${drawerOpen ? " active" : ""}" data-drawer>record</button>${sw(s.killswitch, "kill session", "", s.reason)}`;
   }
   function drawTitle() { const s = selectedSession(); const t = view.querySelector(".title"); if (s && t) t.innerHTML = title(s); }
   function drawSession() {
@@ -328,6 +332,10 @@
     streams.forEach((st, i) => {
       const y = top + i * rowH, a = ms(st.started), b = st.ended ? ms(st.ended) : tEnd;
       svg += `<text class="lane-label" x="4" y="${y + 13}">${esc(st.model)}</text><text class="lane-sub" x="4" y="${y + 25}">${esc(st.format)} · ${((b - a) / 1000).toFixed(1)}s</text>`;
+      if (st.refused) {
+        svg += `<rect class="bar refused" x="${x(a)}" y="${y + 4}" width="6" height="${rowH - 8}" rx="2" fill="var(--bad)"><title>refused at the ${esc(st.refused.by)} level by ${esc(st.refused.reason)}</title></rect><text class="cut-label" x="${x(a) + 10}" y="${y + 18}">refused · ${esc(st.refused.reason)}</text>`;
+        return;
+      }
       svg += `<rect class="bar" x="${x(a)}" y="${y + 4}" width="${Math.max(1, x(b) - x(a))}" height="${rowH - 8}" rx="3"/>`;
       for (const p of st.blocks || []) {
         const pa = ms(p.started), pb = p.ended ? ms(p.ended) : tEnd, open = !p.ended && !st.ended;
@@ -340,7 +348,7 @@
       if (st.interrupted) {
         const tc = x(ms(st.interrupted.at));
         const left = tc > W - R - 70;
-        svg += `<line class="cut" x1="${tc}" y1="${y + 2}" x2="${tc}" y2="${y + rowH - 2}"/><text class="cut-label" x="${left ? tc - 4 : tc + 4}" y="${y + 12}" text-anchor="${left ? "end" : "start"}">✂ ${esc(st.interrupted.by)}</text>`;
+        svg += `<line class="cut" x1="${tc}" y1="${y + 2}" x2="${tc}" y2="${y + rowH - 2}"/><text class="cut-label" x="${left ? tc - 4 : tc + 4}" y="${y + 12}" text-anchor="${left ? "end" : "start"}">✂ ${esc(st.interrupted.reason)}</text>`;
       }
     });
     if (running) { const n = x(tEnd); svg += `<line class="now" x1="${n}" y1="${top}" x2="${n}" y2="${H - 18}"/>`; }
@@ -378,20 +386,22 @@
       <div class="body">${esc(bodyOf(b))}</div></div>`;
   }
   function drawFoot(st) {
-    const u = composeResponse(st).usage || {};
+    const u = (composeResponse(st) || {}).usage || {};
     const tokens = u.input_tokens != null ? `${u.input_tokens} in · ${u.output_tokens} out` : u.prompt_tokens != null ? `${u.prompt_tokens} in · ${u.completion_tokens} out` : "";
     const first = (st.blocks || [])[0];
     const parts = [st.ended ? `ended ${clock(st.ended)}` : "streaming", span(st.started, st.ended), first ? `first piece after ${span(st.started, first.started)}` : "", endOf(st), tokens];
-    if (st.interrupted) parts.push(`<span class="cut">cut by the ${esc(st.interrupted.by)} killswitch at ${clock(st.interrupted.at)}</span>`);
+    if (st.interrupted) parts.push(`<span class="cut">cut at the ${esc(st.interrupted.by)} level by ${esc(st.interrupted.reason)} at ${clock(st.interrupted.at)}</span>`);
+    if (st.refused) parts.push(`<span class="cut">refused at the ${esc(st.refused.by)} level by ${esc(st.refused.reason)}: no connection was opened</span>`);
+    for (const a of st.alerts || []) parts.push(`<span class="alert">alert · ${esc(a.rule)} · ${esc(a.when)}</span>`);
     if (st.error) parts.push(`<span class="error">${esc(st.error)}</span>`);
     return parts.filter(Boolean).join("<span>·</span>");
   }
   function drawStream(st) {
-    const state = st.interrupted ? " interrupted" : st.ended ? "" : " running";
+    const state = st.interrupted || st.refused ? " interrupted" : st.ended ? "" : " running";
     const sel = picked && picked.stream === st.id;
     return `<article class="stream${state}${sel ? " selected" : ""}" id="st-${esc(st.id)}">
       <div class="head"><span class="model">${esc(st.model)}</span><span class="badge">${esc(st.provider)} · ${esc(st.format)}</span>
-        ${st.interrupted ? '<span class="badge cut">interrupted</span>' : st.ended ? "" : '<span class="badge live">live</span>'}<span class="id">${esc(st.id)}</span><span class="when">${clock(st.started)}</span></div>
+        ${st.refused ? '<span class="badge cut">refused</span>' : st.interrupted ? '<span class="badge cut">interrupted</span>' : st.ended ? "" : '<span class="badge live">live</span>'}${(st.alerts || []).length ? `<span class="badge alert">${st.alerts.length} alert${st.alerts.length === 1 ? "" : "s"}</span>` : ""}<span class="id">${esc(st.id)}</span><span class="when">${clock(st.started)}</span></div>
       <div class="ask"><b>user</b>${esc(lastAsk(st.request))}</div>
       <div class="blocks">${(st.blocks || []).map((b) => drawBlock(b, st)).join("")}</div>
       <div class="foot">${drawFoot(st)}</div></article>`;
@@ -463,7 +473,7 @@
   const handlers = {
     "stream.started"(e) {
       const s = session(e.agent, e.session, e.snapshot.started);
-      const st = {...e.snapshot, blocks: [], ticks: new Map()};
+      const st = {...e.snapshot, blocks: [], alerts: [], ticks: new Map()};
       s.streams.set(st.id, st); s.count += 1; s.ended = null;
       if (!selected) { select(e.agent, e.session); return; }
       if (inView(e)) { drawTitle(); const t = view.querySelector(".transcript"); if (t) { t.insertAdjacentHTML("beforeend", drawStream(st)); t.scrollTop = t.scrollHeight; } keepWireMoving(); tickWire(); redrawDrawer(); }
@@ -485,14 +495,19 @@
     },
     "stream.ended"(e, st) {
       Object.assign(st, e.snapshot, {blocks: st.blocks, request: st.request, ticks: st.ticks});
+      if (st.refused || st.interrupted) s_count_cut(e);
       const s = session(e.agent, e.session, st.started);
       if ([...s.streams.values()].every((x) => x.ended)) s.ended = st.ended;
-      if (st.interrupted) s.interrupted += 1;
       if (inView(e)) { drawTitle(); const n = document.getElementById(`st-${st.id}`); if (n) n.outerHTML = drawStream(st); tickWire(); redrawDrawer(); }
       drawNav();
     },
+    "rule.fired"(e, st) {
+      if (e.action === "alert") (st.alerts ||= []).push({rule: e.rule, when: e.when, at: e.time});
+      if (inView(e)) { const n = document.getElementById(`st-${st.id}`); if (n) n.outerHTML = drawStream(st); }
+    },
     "killswitch"(e) { applySwitches(e.state); drawNav(); drawTitle(); },
   };
+  const s_count_cut = (e) => { const s = session(e.agent, e.session, null); s.interrupted += 1; };
   function apply(e) {
     if (e.time) skew = ms(e.time) - Date.now();
     if (e.type === "killswitch") { handlers.killswitch(e); return; }

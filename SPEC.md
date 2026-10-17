@@ -2,170 +2,132 @@
 
 ## What it is
 
-A gateway for model calls, with real-time observability and a killswitch.
+A gateway for model calls that taps the wire.
 
-An agent points its SDK at the gateway instead of at a provider, presents its agent key, and names the model as the provider names it. The gateway forwards the call to that provider in the provider's own wire format, using the provider's own SDK, with the provider's key held by the gateway. While the response streams back, the gateway reads a copy of every line into a record and forwards the line unchanged. The record is live: anyone watching sees the response take shape block by block, as it happens. An operator can stop any of it, at the gateway, at an agent, or at a session, and what is stopped is cut mid-stream and refused until turned back on.
+An agent points its SDK at the gateway, presents its virtual key, and names its model as `provider/model`. The gateway opens one connection to that provider through the SDK the agent chose by its door, passes the request through verbatim, and reads every line of the response as it streams back, folding each into a record by shape, never by name. Rules run in that loop at three moments and set the killswitch. Everything the gateway sees is published as it happens.
 
-Nothing is translated, nothing is executed, and no decision is made about a call except whether it may run.
+The gateway holds three kinds of thing, and makes no decisions itself:
+
+- **Providers**: a name, a root URL, a key.
+- **Agents**: a name, its virtual keys.
+- **Rules**: CEL expressions over what the tap sees, at a moment, on the gateway or on one agent.
 
 ## What it is not
 
-- Not a translator. Messages in, Messages out. Chat Completions in, Chat Completions out. A provider speaks one format; a model is called on that format's endpoint.
-- Not a harness. The agent keeps its loop, its context, and its tools. The gateway never builds a request and never runs a tool.
-- Not a store of conversations. The caller resends its transcript on every call, as the wire formats require. The record keeps a copy of what passed through, stamped; it is observation, not state the agent depends on.
-- Not a policy engine. Rules over the record, with stop and alert, come next, on top of this. This version has the switches an operator pulls by hand.
+- Not a translator. The door the call comes through is the format it leaves by.
+- Not a harness. The agent keeps its loop, its context and its tools; the gateway never builds a request and never runs a tool.
+- Not a table of permissions. No grants, no aliases, no model lists. What an agent may do is a rule.
+- Not a store of conversations. The caller resends its transcript on every call. The record is observation.
 
-## The objects
+## The two doors
 
-```
-gateway                        one process, one config file; holds the gateway killswitch
-  provider                     an endpoint and a key; the endpoint's path says the format
-    model                      the provider's own model name
-  agent                        a name, its keys, the models it may use; holds its killswitch
-    session                    named by the agent in X-Session; holds its killswitch
-      stream                   one request and the response that streamed back for it
-        block                  one piece of the response
-```
+| Door | SDK behind it | Reaches |
+|---|---|---|
+| `POST /v1/messages` | `anthropic` | the provider's root; the SDK appends `/v1/messages` |
+| `POST /v1/chat/completions` | `openai` | the provider's root plus `/v1`; the SDK appends `/chat/completions` |
 
-**Provider.** `endpoint`, the full URL the provider serves, and `key`. The path of the endpoint says which format it speaks and so which SDK reaches it:
-
-| Endpoint ends in | Format | SDK | The SDK's base_url is the endpoint without |
-|---|---|---|---|
-| `/v1/messages` | Anthropic Messages | `anthropic` | `/v1/messages` |
-| `/chat/completions` | OpenAI Chat Completions | `openai` | `/chat/completions` |
-
-A provider that serves both formats is two providers. `models` lists the names the provider uses.
-
-**Agent.** `keys`, one or more, and `models`, as `provider/model`. The grants decide how a model name in a call resolves: on the format the call arrived on, among this agent's grants, by name. One model name resolves to one provider per format for an agent; a configuration that grants the same name on two providers of the same format is refused when loaded.
-
-**Operator.** One `admin` key. It reads every agent's record, holds every switch, and opens the page. It cannot call a model.
-
-## The two endpoints
-
-| Endpoint | Format | Forwarded with | Serves models whose provider's endpoint ends in |
-|---|---|---|---|
-| `POST /v1/messages` | Anthropic Messages | the `anthropic` SDK | `/v1/messages` |
-| `POST /v1/chat/completions` | OpenAI Chat Completions | the `openai` SDK | `/chat/completions` |
+A provider has no format. One provider serves both doors if it speaks both formats, and says so itself, with its own error passed through, if it does not. The caller picks the SDK by picking the door.
 
 A call is handled in this order:
 
 1. **Who.** The key, `x-api-key` or `Authorization: Bearer`, names an agent; otherwise `401`.
-2. **Switched off.** The gateway, this agent, or this session has its killswitch on: `423`, with `error.level` naming which.
-3. **Streaming only.** `"stream": true`, otherwise `400`. A streamed call is the only kind that can be observed and cut while it runs.
-4. **Which model.** The body's `model`, resolved through the agent's grants on this format. Not granted: `404`. Granted on the other format: `400` naming the right endpoint.
-5. **Pass-through.** The body goes to the SDK as the SDK's own parameters; any field the installed SDK does not know is passed as `extra_body`. The `anthropic-beta` header is forwarded. The provider's key is attached. The only change to the body is nothing; the model name is already the provider's.
-6. **Verbatim response.** The provider's stream lines are forwarded as they arrive. The response carries `X-Agent`, `X-Session` and `X-Stream`.
-7. **Errors pass through.** A provider's refusal comes back with the provider's status and body. A failure before any line was forwarded is a `502` with the cause; after, one error line in the format's own shape.
+2. **Where.** `model` is `provider/model`; the provider is looked up by name, the rest is the model as the provider names it. A bare name works when one provider is configured; otherwise `404` naming the choices.
+3. **Streaming only.** `"stream": true`, otherwise `400`.
+4. **The request moment.** The request rules run over the whole request. A trip sets a switch.
+5. **The switches.** The gateway, this agent, or this session has its switch on: `423` with the level and the reason, and the call is recorded as a refused stream that never opened a connection.
+6. **Pass-through.** The body goes to the SDK as its own parameters, unknown fields as `extra_body`, the provider's key attached, `anthropic-beta` forwarded, the model name as the provider names it. The response's lines are forwarded as they arrive, and the response carries `X-Agent`, `X-Session`, `X-Stream`.
+7. **The stream moment.** On every line: the line is tapped, the stream rules run over the response as far as it has got, and the line is forwarded. A switch set by a rule is seen on the next line or the next tenth of a second, and the stream is cut.
+8. **The response moment.** After the last line: the response rules run over the whole response. A trip affects the next call; an alert is recorded.
 
-`X-Session` names the session; absent, `default`. Letters, digits, dots, dashes, underscores. Sessions are per agent: two agents may both have `default`.
+`X-Session` names the session; absent, `default`. Sessions are per agent.
 
-`GET /v1/models` lists, in the shape both SDKs expect, the models an agent key may use, with each one's provider, format and endpoint; everything, for the operator.
+## The tap
+
+The tap knows the envelope of each door and nothing about what is inside it:
+
+| Door | Head | Opens a piece | Grows a piece |
+|---|---|---|---|
+| Messages | a line with `message`; a `delta` without index; `usage` | `content_block` with `index`, at `content[i]` | `delta` with `index` |
+| Chat Completions | every chunk's top-level fields, minus per-chunk padding | a delta to a different place than the open piece, at `choices[i].message.<key>`, one per index for an indexed list | the same delta |
+
+One merge folds every delta into its piece by shape: strings grow, objects merge, lists of objects with an `index` merge entry by entry, anything else is set, `type` is set once, null never erases. No name of any block or field appears in the tap. The one convention kept is the Messages door's: a piece's `partial_json` is its `input`, parsed as far as it has got while open. Proof: the real wire captures in `tests/fixtures` assemble through the merge into exactly what each provider's own SDK assembles, and a synthetic stream with a block type, delta type and fields no SDK knows is recorded whole.
 
 ## The record
 
-Every level has an id, a start and an end.
+```
+agent
+└─ session
+   └─ stream                  one connection, opened and closed; or refused, never opened
+      ├─ request              the body, verbatim, with the model as the provider names it
+      └─ response             the body the provider would have returned whole, with its pieces timed
+```
 
-**Agent.** `agent`, `sessions`, `streams`, `running`, `interrupted`, `last`, `killswitch`.
+**Stream.** `id`, `agent`, `session`, `door`, `provider`, `model`, `started`, `ended`, `request`, `response`, `blocks` (the pieces, each with `at`, `started`, `ended` and the provider's own fields), `refused` (`by`, `reason`), `interrupted` (`by`, `reason`, `at`, `block`), `alerts` (`rule`, `when`, `at`), `error`. In Messages the pieces are `response.content`; in Chat Completions they sit beside the merged message as `response.blocks`.
 
-**Session.** `agent`, `session`, `started` at its first stream, `ended` when its last stream ended, `streams`, `interrupted`, `killswitch`.
-
-**Stream.** One connection to the provider: `started` when it opened, `ended` when it closed. Two bodies, both in the provider's format: `request` exactly as received, and `response` as a non-streaming call would have returned it, assembled from the stream: in Messages the message with its `content`, `stop_reason`, `stop_sequence` and `usage`; in Chat Completions the completion with one choice, its `message` (`content`, `reasoning_content`, `tool_calls`), `finish_reason` and `usage`. Nothing in `response` is renamed. Then `blocks[]`, the response's content as it streamed, piece by piece, with times. Then the gateway's own fields: `id`, `agent`, `session`, `provider`, `model`, `format`, `interrupted` (`null`, or `by` the level that cut it, `at` when, and the `block` it landed in, by its `at`), `error`. A cut stream's response ends with the reason `interrupted`.
-
-**Piece.** A piece is one object the provider sent as part of the response, grown by the deltas that followed it. The gateway adds three fields and nothing else: `at`, where the piece lives in the response; `started`, when it opened; `ended`, when it closed. Everything inside a piece is the provider's own: its `type` if it sent one, its fields under its own names, including names that did not exist when the gateway was written.
-
-The gateway reads a stream with one rule and no vocabulary. It knows the envelope of each format, which part of a line is the head, which opens a piece, which grows one, and folds each delta into its piece by shape alone: strings grow, objects merge, lists of objects that carry an `index` merge entry by entry, anything else is set, `type` is set once, null never erases. No code in the tap names `text`, `thinking`, `tool_use`, `content`, `reasoning_content` or `tool_calls`. A block type or field that a provider adds next year is recorded whole the day it appears.
-
-| Format | Where pieces live | What opens one | One convention |
-|---|---|---|---|
-| Messages | `response.content[i]`, at `content[i]` | the wire's own block start and stop | a piece's JSON text, sent as `partial_json`, is its `input`: parsed as far as it has got while open, whole when closed |
-| Chat Completions | `response.blocks[]`, each at `choices[i].message.<key>` or `<key>[j]` | a delta to a different place than the open piece; a list of indexed objects is one piece per index | none |
-
-In Chat Completions the native message has no pieces, so the pieces sit beside it inside `response` as `blocks`, the same deltas with their times. The message is those deltas merged.
-
-Proof: the five real wire captures in `tests/fixtures`, from Anthropic, OpenAI, Anthropic's compatible endpoint and Ollama, assemble through this merge into exactly the object each provider's own SDK assembles, and a synthetic stream with a block type, a delta type and fields no SDK knows is recorded whole.
+Every finished stream is appended as one JSON line to the record file.
 
 ## Real time
 
-The record is built from the stream's lines as they are forwarded, not afterwards. A block appears the moment it opens, grows with each delta, and gets its end time when it closes. Reading the record at any instant returns the stream as it stands at that instant.
-
-Feeds publish the record's own events as server-sent events, at three scopes:
-
-| Feed | Scope |
-|---|---|
-| `GET /v1/live` | everything the key may see: every agent for the operator, itself for an agent |
-| `GET /v1/agents/{agent}/live` | one agent |
-| `GET /v1/agents/{agent}/sessions/{session}/live` | one session |
-
-Every event names its `type`, the `time` it was published, `agent`, `session` and, for stream events, `stream`, by id, and carries its payload under its own key:
+Feeds publish the record's own events as server-sent events: `GET /v1/live` for everything the key may see, `GET /v1/agents/{agent}/live`, `GET /v1/agents/{agent}/sessions/{session}/live`. Every event names `type`, `time`, `agent`, `session` and, for stream events, `stream`:
 
 | Event | Carries |
 |---|---|
-| `stream.started` | `snapshot`: the stream without blocks, request included |
-| `stream.response` | `response`: what the provider said about the response before its blocks: id, model, role |
-| `block.started` | `at`, `block`: the piece as it opened, with `started` and no `ended` |
-| `block.delta` | `at`, `delta`: the delta object exactly as the provider sent it |
-| `block.ended` | `at`, `block`: the piece, whole, with `ended` |
-| `stream.ended` | `snapshot`: the stream without blocks or request: the whole `response`, the interruption, the end time |
-| `killswitch` | `level`, `on`, `agent`, `session`, and the whole `state` |
+| `stream.started` | `snapshot`: the stream with its request |
+| `stream.response` | `response`: what the head said that it had not said before |
+| `block.started` | `at`, `block` |
+| `block.delta` | `at`, `delta`, the object as the provider sent it |
+| `block.ended` | `at`, `block` |
+| `rule.fired` | `rule`, `when`, `action`, `trip` |
+| `killswitch` | `level`, `on`, `agent`, `session`, `reason`, `state` |
+| `stream.ended` | `snapshot`: the stream with its whole response, its refusal, interruption and alerts |
 
-The first event on any feed is `watching`, with the scope and the killswitch state. A keepalive comment is sent every fifteen seconds of silence.
+Reading: `GET /v1/agents`, `/v1/agents/{agent}`, `/v1/agents/{agent}/sessions/{session}` (`?blocks=false`), `/v1/streams/{stream}`, `/v1/providers`, `/v1/rules`, `/v1/me`. An agent's key sees that agent; the operator's key sees all.
 
-## Reading the record
+## Rules
 
-| Endpoint | Returns |
+A rule has a name, an expression, a moment, an action and a place.
+
+| | |
 |---|---|
-| `GET /v1/me` | whether the key is the operator's, or which agent's |
-| `GET /v1/agents` | every agent the key may see, summarised |
-| `GET /v1/agents/{agent}` | the agent, its grants, its switch, its sessions summarised |
-| `GET /v1/agents/{agent}/sessions/{session}` | the session with its streams and their blocks; `?blocks=false` omits blocks |
-| `GET /v1/streams/{stream}` | one stream with its blocks |
+| `when` | `request`, `stream`, `response` |
+| `action` | `trip`, which sets the killswitch; `alert`, which only records |
+| `on` | `gateway`, which sees every agent; or an agent's name |
+| `trip` | a gateway rule trips the `agent` (default) or the `session`; an agent rule trips the `session`; nothing trips the gateway |
 
-An agent's key sees that agent only; the operator's key sees all. Every finished stream is also appended, as one JSON line, to the record file named in config.
+A rule sees `agent`, `session`, `provider`, `model`, `door`, `request`, `response` as composed so far, `piece`, the one still open, and `text`, every string anywhere in what the moment is about. A rule that cannot be evaluated on a view does not fire.
+
+```
+text.matches("AKIA[0-9A-Z]{16}")                      on the gateway, when = request
+!(model in ["gpt-5-mini"])                             on an agent, when = request
+text.contains("rm -rf")                                on an agent, when = stream
+response.usage.output_tokens > 4000                    anywhere, when = response, action = alert
+```
+
+The rules run in the loop, on the hot path: the line a stream rule fires on is the last line the caller receives.
 
 ## The killswitch
 
-A state at three levels. On means two things at once, for everything in scope: running streams are cut, new calls are refused with `423`. Off means calls run. There is no pause.
+A state at three levels with the reason it was set: a rule's name, or `operator`. On: running streams in scope are cut within a tenth of a second, closed upstream so the provider stops, closed downstream as a whole message so the caller's SDK returns with `interrupted`; new calls are refused with `423`. Off: calls run. Only the operator's key sets a switch by hand, with `PUT /v1/killswitch`, `/v1/agents/{agent}/killswitch`, `/v1/agents/{agent}/sessions/{session}/killswitch`. The gateway level is set only by hand.
 
-| Switch | Set with | Cuts | Refuses |
-|---|---|---|---|
-| gateway | `PUT /v1/killswitch {"on": true}` | every running stream | every call |
-| agent | `PUT /v1/agents/{agent}/killswitch` | every running stream of that agent | that agent's calls |
-| session | `PUT /v1/agents/{agent}/sessions/{session}/killswitch` | the running streams in that session | calls naming that session |
+## The page
 
-Only the operator's key sets a switch. `GET /v1/killswitch` returns the state: `gateway`, `agents[]`, `sessions[]`.
-
-A cut lands within a tenth of a second of the switch, whatever the provider is doing, including while it is silent. The gateway closes its connection to the provider, so the provider stops generating. It ends the caller's stream with a whole message in the format's own shape, so the caller's SDK returns normally: in Messages, `content_block_stop` for the open block, `message_delta` with `stop_reason: "interrupted"`, `message_stop`; in Chat Completions, a final chunk marked `"interrupted": true` with a finish reason, then `[DONE]`. The record marks the stream `interrupted`, by which level, at what time, and at which piece, and that piece gets its end time.
-
-Every switch change is published on the feeds as a `killswitch` event.
-
-## The UI
-
-`GET /` serves a single page. It takes the operator's key or an agent's key. Agents on the left with their sessions beneath; the selected session's streams in the middle, blocks and all, updating from the live feed as calls run. The killswitches are on the page: one in the header for the gateway, one on each agent, one on the selected session. They are live for the operator and shown, disabled, to an agent. A cut stream is marked, and the block it was cut in says so.
-
-The page passes the key as `?key=` on the feed, since browsers cannot set headers on a server-sent events connection; every `GET` therefore accepts the key as a query parameter as well as a header.
+`GET /` serves a page on the feed: agents and sessions with their switches; for a session, the wire, a strip chart of its streams on its clock with pieces as segments, deltas as ticks, cuts and refusals marked; the transcript, each stream as it reads; and the record, the exact document as nested nodes growing in place.
 
 ## Configuration
 
-A TOML file. Values written `env:NAME` are read from the environment. See `model-interface.example.toml`.
-
 ```toml
 admin = "env:MI_ADMIN_KEY"
-record = "~/.model-interface/streams.jsonl"
 
 [providers.anthropic]
-endpoint = "https://api.anthropic.com/v1/messages"
+url = "https://api.anthropic.com"
 key = "env:ANTHROPIC_API_KEY"
-models = ["claude-sonnet-5-5"]
-
-[providers.ollama]
-endpoint = "http://localhost:11434/v1/chat/completions"
-models = ["qwen2.5:3b"]
 
 [agents.coder]
 keys = ["env:CODER_KEY"]
-models = ["anthropic/claude-sonnet-5-5", "ollama/qwen2.5:3b"]
+
+[[rules]]
+name = "no destructive commands"
+on = "coder"
+when = "stream"
+expr = 'text.contains("rm -rf")'
 ```
-
-## What comes next, and is not here
-
-Rules: expressions over the record's schema, at gateway scope for every agent or at agent scope for one, evaluated at the moments the feeds already publish, with two actions, stop and alert, and registered functions a rule may call. Configuration in the UI with an operator login and a database behind it, instead of this file. Tools, registered on the gateway and executed in sandboxes, recorded and cut the same way. Each is built on this record, this feed and these switches, and changes nothing about the endpoints.

@@ -1,43 +1,57 @@
 # Copy to model-interface.toml. Values written as "env:NAME" are read from the environment.
 
-admin = "env:MI_ADMIN_KEY"             # the operator: reads every agent's record, holds the killswitches, opens the page
-record = "~/.model-interface/streams.jsonl"  # one line per finished stream: request, blocks, timings
+admin = "env:MI_ADMIN_KEY"             # the operator: reads every record, holds the switches, opens the page
+record = "~/.model-interface/streams.jsonl"
 
-# A provider is an endpoint and a key. The endpoint's path says which format it speaks, and so which
-# SDK reaches it: .../v1/messages is Messages (the anthropic SDK), .../chat/completions is Chat
-# Completions (the openai SDK). Models are the provider's own names.
+# A provider is a name, a root URL and a key. Nothing else. The caller's door decides which SDK reaches it:
+# /v1/messages uses the Anthropic SDK, /v1/chat/completions uses the OpenAI SDK, against this root.
 
 [providers.anthropic]
-endpoint = "https://api.anthropic.com/v1/messages"
+url = "https://api.anthropic.com"
 key = "env:ANTHROPIC_API_KEY"
-models = ["claude-sonnet-5-5", "claude-haiku-5-5"]
 
 [providers.openai]
-endpoint = "https://api.openai.com/v1/chat/completions"
+url = "https://api.openai.com"
 key = "env:OPENAI_API_KEY"
-models = ["gpt-5"]
 
-[providers.deepseek]                   # DeepSeek serves Messages too; the same provider in the other format is a second entry
-endpoint = "https://api.deepseek.com/anthropic/v1/messages"
-key = "env:DEEPSEEK_API_KEY"
-models = ["deepseek-chat"]
+[providers.ollama]
+url = "http://localhost:11434"
 
-[providers.ollama]                     # local, no key, in Messages format
-endpoint = "http://localhost:11434/v1/messages"
-models = ["qwen2.5:3b"]
-
-[providers.ollama-openai]              # the same local models, in Chat Completions format
-endpoint = "http://localhost:11434/v1/chat/completions"
-models = ["qwen2.5:3b"]
-
-# An agent is a name, its keys, and the models it may use, as provider/model. A call names the model
-# directly, as the provider names it; the agent's grants say which provider that is. One model name
-# resolves to one provider per format for an agent.
+# An agent is a name and its virtual keys. Nothing else. A call names its model as provider/model.
 
 [agents.coder]
 keys = ["env:CODER_KEY"]
-models = ["anthropic/claude-sonnet-5-5", "deepseek/deepseek-chat", "ollama-openai/qwen2.5:3b"]
 
-[agents.local]
-keys = ["env:LOCAL_KEY"]
-models = ["ollama/qwen2.5:3b", "ollama-openai/qwen2.5:3b"]
+[agents.support]
+keys = ["env:SUPPORT_KEY"]
+
+# Rules are CEL over what the tap sees, at a moment: request (before a connection opens), stream (on every
+# line while it is open), response (after it closed). A rule lives on the gateway or on one agent. `trip`
+# sets the killswitch: a gateway rule trips the agent (or its session), an agent rule trips the session.
+# `alert` only records. The gateway switch has no rule: it is for people.
+#
+# A rule sees: agent, session, provider, model, door, request, response (so far), piece (the open one), and
+# text, every string in what the moment is about.
+
+[[rules]]
+name = "no credentials in requests"
+when = "request"
+expr = 'text.matches("AKIA[0-9A-Z]{16}|sk-[A-Za-z0-9_-]{20,}|BEGIN (RSA|OPENSSH) PRIVATE KEY")'
+
+[[rules]]
+name = "support stays on small models"
+on = "support"
+when = "request"
+expr = '!(model in ["gpt-5-mini", "claude-haiku-5-5"])'
+
+[[rules]]
+name = "no destructive commands"
+on = "coder"
+when = "stream"
+expr = 'text.matches("rm -rf|DROP TABLE|mkfs|git push --force")'
+
+[[rules]]
+name = "long answers are noted"
+when = "response"
+action = "alert"
+expr = 'has(response.usage) && (response.usage.output_tokens > 4000 || response.usage.completion_tokens > 4000)'

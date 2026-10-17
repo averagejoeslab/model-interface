@@ -3,12 +3,11 @@
 # ///
 """A minimal harness agent on the gateway: streams the model's words, runs its own one tool, keeps its own context.
 
-    MI_URL=http://127.0.0.1:8080 MI_KEY=<agent key> MI_MODEL=claude-sonnet-5-5 MI_SESSION=demo uv run examples/agent.py "The tests are failing. Find out why and fix it."
+    MI_URL=http://127.0.0.1:8080 MI_KEY=<agent key> MI_MODEL=anthropic/claude-sonnet-5-5 MI_SESSION=demo uv run examples/agent.py "The tests are failing. Find out why and fix it."
 
-The gateway holds the provider key, resolves the model name through the agent's grants, records
-every call under the agent and session block by block as it streams, and can cut any call with the
-killswitch. Open the gateway's page to watch. The tool runs here; that line is where a sealed
-execution call goes.
+The gateway holds the provider key, routes by the provider named in the model, taps every call as it
+streams, runs the rules in the loop, and can cut any call with the killswitch. Open the gateway's page
+to watch. The tool runs here; that line is where a sealed execution call goes.
 """
 import os
 import subprocess
@@ -18,7 +17,7 @@ from anthropic import Anthropic
 
 client = Anthropic(base_url=os.environ["MI_URL"], api_key=os.environ["MI_KEY"])   # the gateway, with the agent's key
 SESSION = os.environ.get("MI_SESSION", "demo")
-MODEL = os.environ.get("MI_MODEL", "claude-sonnet-5-5")                          # the provider's own name
+MODEL = os.environ.get("MI_MODEL", "anthropic/claude-sonnet-5-5")                # provider/model
 
 TOOLS = [{"name": "shell", "description": "Run a shell command in the current folder.",
           "input_schema": {"type": "object", "properties": {"cmd": {"type": "string"}}, "required": ["cmd"]}}]

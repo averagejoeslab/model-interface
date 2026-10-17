@@ -1,61 +1,68 @@
-"""Providers, models, agents and the file they are read from."""
-import os
+"""Providers, agents, rules, and the file they are read from."""
 import textwrap
 
 import pytest
 
-from model_interface.config import load
-from model_interface.providers import Agent, Provider, format_of
+from model_interface.config import Config, load
+from model_interface.providers import Agent, Provider
+from model_interface.rules import Rule
 
 
-def test_the_endpoint_says_the_format_and_the_sdks_base_url():
-    p = Provider("deepseek", "https://api.deepseek.com/anthropic/v1/messages", "k", ["deepseek-chat"])
-    assert p.format.name == "anthropic" and p.url == "https://api.deepseek.com/anthropic" and p.models[0].id == "deepseek/deepseek-chat"
-    g = Provider("groq", "https://api.groq.com/openai/v1/chat/completions/", "k", ["llama-3.3-70b-versatile"])
-    assert g.format.name == "openai" and g.url == "https://api.groq.com/openai/v1"
-    with pytest.raises(ValueError, match="/v1/messages or /chat/completions"):
-        format_of("https://api.example.com/v1/responses")
+def test_a_provider_is_a_name_a_url_and_a_key_and_an_agent_a_name_and_keys():
+    p = Provider("deepseek", "https://api.deepseek.com", "k")
+    assert (p.name, p.url, p.key) == ("deepseek", "https://api.deepseek.com", "k") and not hasattr(p, "format")
+    assert Agent("a", ["k1", "k2"]).keys == ["k1", "k2"]
 
 
-def test_an_agent_resolves_a_model_name_on_the_format_it_called_and_may_not_be_ambiguous():
-    direct = Provider("deepseek", "https://api.deepseek.com/v1/chat/completions", "k", ["deepseek-chat"])
-    via = Provider("openrouter", "https://openrouter.ai/api/v1/chat/completions", "k", ["deepseek-chat"])
-    messages = Provider("deepseek-messages", "https://api.deepseek.com/anthropic/v1/messages", "k", ["deepseek-chat"])
-    both = Agent("a", ["k"], [direct.model("deepseek-chat"), messages.model("deepseek-chat")])
-    assert both.resolve(direct.format, "deepseek-chat").provider is direct
-    assert both.resolve(messages.format, "deepseek-chat").provider is messages
-    assert both.resolve(direct.format, "other") is None
-    with pytest.raises(ValueError, match="one provider per format"):
-        Agent("b", ["k"], [direct.model("deepseek-chat"), via.model("deepseek-chat")])
+def test_a_rule_knows_where_it_may_trip():
+    assert Rule("g", "true").trip == "agent" and Rule("a", "true", on="coder").trip == "session"
+    assert Rule("g2", "true", trip="session").trip == "session"
+    with pytest.raises(ValueError, match="for people"):
+        Rule("bad", "true", on="coder", trip="agent")
+    with pytest.raises(ValueError, match="for people"):
+        Rule("bad", "true", trip="gateway")
+    with pytest.raises(ValueError, match="when must be"):
+        Rule("bad", "true", when="sometime")
+    with pytest.raises(ValueError, match="rule 'bad'"):
+        Rule("bad", "this is not CEL (")
+
+
+def test_a_rule_on_an_unknown_agent_is_refused():
+    with pytest.raises(ValueError, match="not an agent"):
+        Config(agents={}, rules=[Rule("r", "true", on="ghost")])
 
 
 def test_the_file_is_loaded_with_secrets_from_the_environment(tmp_path, monkeypatch):
-    monkeypatch.setenv("T_ADMIN", "adm")
-    monkeypatch.setenv("T_CODER", "ck")
-    monkeypatch.setenv("T_PROV", "pk")
+    monkeypatch.setenv("T_ADMIN", "adm"); monkeypatch.setenv("T_CODER", "ck"); monkeypatch.setenv("T_PROV", "pk")
     f = tmp_path / "mi.toml"
     f.write_text(textwrap.dedent('''
         admin = "env:T_ADMIN"
         record = "/tmp/x.jsonl"
 
         [providers.anthropic]
-        endpoint = "https://api.anthropic.com/v1/messages"
+        url = "https://api.anthropic.com"
         key = "env:T_PROV"
-        models = ["claude-sonnet-5-5", "claude-haiku-5-5"]
 
         [providers.ollama]
-        endpoint = "http://localhost:11434/v1/chat/completions"
-        models = ["qwen2.5:3b"]
+        url = "http://localhost:11434"
 
         [agents.coder]
         keys = ["env:T_CODER", "plain-second-key"]
-        models = ["anthropic/claude-sonnet-5-5", "ollama/qwen2.5:3b"]
+
+        [[rules]]
+        name = "coder stays on small models"
+        on = "coder"
+        when = "request"
+        expr = 'model != "claude-haiku-5-5"'
+
+        [[rules]]
+        name = "no keys anywhere"
+        when = "stream"
+        expr = 'text.matches("sk-[A-Za-z0-9]{20,}")'
+        action = "alert"
     '''))
     c = load(str(f))
-    assert c.admin == "adm" and c.record == "/tmp/x.jsonl"
-    assert c.providers["anthropic"].key == "pk" and c.providers["ollama"].key == ""
+    assert c.admin == "adm" and c.providers["anthropic"].key == "pk" and c.providers["ollama"].key == ""
     assert c.agent_of("ck").name == "coder" and c.agent_of("plain-second-key").name == "coder" and c.agent_of("") is None
-    assert [m.id for m in c.agents["coder"].models] == ["anthropic/claude-sonnet-5-5", "ollama/qwen2.5:3b"]
-    f.write_text(f.read_text().replace('"ollama/qwen2.5:3b"', '"ollama/nope"'))
-    with pytest.raises(ValueError, match="has no model 'nope'"):
-        load(str(f))
+    assert [(r.name, r.on, r.when, r.action, r.trip) for r in c.rules] == [
+        ("coder stays on small models", "coder", "request", "trip", "session"), ("no keys anywhere", "gateway", "stream", "alert", "agent")]
